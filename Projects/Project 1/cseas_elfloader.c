@@ -10,6 +10,30 @@
 #include <libelf.h>
 #include <gelf.h>
 #include "elf_helpers.h"
+#include <capstone/capstone.h>
+
+void disas(csh handle, const unsigned char *buffer, unsigned int size)
+{
+    cs_insn *insn;
+    size_t count;
+
+    printf("Size: %d\n", size);
+    count = cs_disasm(handle, buffer, size, 0x0, 0, &insn);
+
+    printf("Instructions: %ld\n", count);
+    if (count > 0)
+    {
+        size_t j;
+        for (j = 0; j < count; j++)
+        {
+            printf("0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+                   insn[j].op_str);
+        }
+        cs_free(insn, count);
+    }
+    else
+        fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
+}
 
 void print_symbol_table(Elf *elf, Elf_Scn *scn)
 {
@@ -24,18 +48,20 @@ void print_symbol_table(Elf *elf, Elf_Scn *scn)
     data = elf_getdata(scn, NULL);
     count = shdr.sh_size / shdr.sh_entsize;
 
-    fprintf(stderr, "\nPrinting symbol table:\n\n");
-    fprintf(stderr, "%-5s %-16s %-6s %-5s %s\n", "[  Nr]", "Value", "Type", "Bind", "Name");
+    for (int i = 0; i < 100; i++)
+        printf("-");
+    printf("\n\nPrinting symbol table:\n\n");
+    printf("%-5s %-16s %-6s %-5s %s\n", "[  Nr]", "Value", "Type", "Bind", "Name");
     for (int i = 0; i < count; ++i)
     {
         GElf_Sym sym;
         gelf_getsym(data, i, &sym);
         if (ELF64_ST_TYPE(sym.st_info) == STT_FUNC || ELF64_ST_TYPE(sym.st_info) == STT_OBJECT)
-            fprintf(stderr, "[%4d] %-16lx %-6s %-5s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
+            printf("[%4d] %-16lx %-6s %-5s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
     }
 }
 
-void load_file(char *filename)
+void print_details(char *filename, csh handle)
 {
     Elf *elf;
     Elf_Scn *symtab; /* To be used for printing the symbol table.  */
@@ -57,9 +83,9 @@ void load_file(char *filename)
     if (elf_getshdrstrndx(elf, &shstrndx) != 0) // Get section header string index, and save it shstrndx
         DIE("(getshdrstrndx) %s", elf_errmsg(-1));
 
-    fprintf(stderr, "[Nr] %-20s %-16s %-16s %-16s %-16s %-16s\n",
-            "Name",
-            "Type", "Address", "Offset", "Size", "Flags");
+    printf("[Nr] %-20s %-16s %-16s %-16s %-16s %-16s\n",
+           "Name",
+           "Type", "Address", "Offset", "Size", "Flags");
 
     int s_index = 0;
     while ((scn = elf_nextscn(elf, scn)) != NULL) // Loop over the sections, and save them in scn
@@ -72,12 +98,20 @@ void load_file(char *filename)
         {
             // Use the function to get flag names
             const char *flag_names = get_flags_names(shdr.sh_flags);
-            // fprintf(stderr, "%ld", shdr.sh_flags);
-            // fprintf(stderr, "%s\n", flag_names);
+            // printf("%ld", shdr.sh_flags);
+            // printf("%s\n", flag_names);
 
-            fprintf(stderr, "[%2d] %-20s %-16s %-16lx %-16lx %-16lx %-4s\n", s_index++,
-                    elf_strptr(elf, shstrndx, shdr.sh_name),
-                    get_section_type(shdr.sh_type), shdr.sh_addr, shdr.sh_offset, shdr.sh_size, flag_names);
+            printf("\n[%2d] %-20s %-16s %-16lx %-16lx %-16lx %-4s\n", s_index++,
+                   elf_strptr(elf, shstrndx, shdr.sh_name),
+                   get_section_type(shdr.sh_type), shdr.sh_addr, shdr.sh_offset, shdr.sh_size, flag_names);
+
+            // Disassembly
+            Elf_Data *data = NULL;
+            size_t n = 0;
+
+            data = elf_getdata(scn, data);
+            // printf("Size of data: %ld\n", data->d_size);
+            disas(handle, data->d_buf, data->d_size);
         }
         /* Locate symbol table.  */
         if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab")) // strcmp returns 0 if it finds ".symtab", so it will enter if it finds it
@@ -89,11 +123,20 @@ void load_file(char *filename)
 
 int main(int argc, char *argv[])
 {
-
     if (argc < 2)
         DIE("usage: elfloader <filename>");
 
-    load_file(argv[1]);
+    /* Initialize the engine.  */
+    csh handle;
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
+        return -1;
+
+    /* AT&T */
+    cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
+
+    print_details(argv[1], handle);
+
+    cs_close(&handle);
 
     return 1;
 }
