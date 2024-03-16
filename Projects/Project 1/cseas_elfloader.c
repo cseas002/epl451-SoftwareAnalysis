@@ -46,18 +46,21 @@ void print_symbol_table(Elf *elf, Elf_Scn *scn)
         DIE("(getshdr) %s", elf_errmsg(-1));
 
     data = elf_getdata(scn, NULL);
-    count = shdr.sh_size / shdr.sh_entsize;
+    count = shdr.sh_size / shdr.sh_entsize; // Find how many symbols there are
 
+    // Print - just for distinguish purposes
     for (int i = 0; i < 100; i++)
         printf("-");
     printf("\n\nPrinting symbol table:\n\n");
-    printf("%-5s %-16s %-6s %-5s %s\n", "[  Nr]", "Value", "Type", "Bind", "Name");
+    printf("%-5s %-16s %-16s %-16s %s\n", "[  Nr]", "Value", "Type", "Bind", "Name"); // Print the header
+    // For each symbol, print its details
     for (int i = 0; i < count; ++i)
     {
         GElf_Sym sym;
         gelf_getsym(data, i, &sym);
-        if (ELF64_ST_TYPE(sym.st_info) == STT_FUNC || ELF64_ST_TYPE(sym.st_info) == STT_OBJECT)
-            printf("[%4d] %-16lx %-6s %-5s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
+        // If the symbol type is a function, then print it. I used helper functions to print the names instead of the numbers
+        if (ELF64_ST_TYPE(sym.st_info) == STT_FUNC)
+            printf("[%4d] %-16lx %-16s %-16s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
     }
 }
 
@@ -85,7 +88,7 @@ void print_details(char *filename, csh handle)
 
     printf("[Nr] %-20s %-16s %-16s %-16s %-16s %-16s\n",
            "Name",
-           "Type", "Address", "Offset", "Size", "Flags");
+           "Type", "Address", "Offset", "Size", "Flags"); // Print the header
 
     int s_index = 0;
     while ((scn = elf_nextscn(elf, scn)) != NULL) // Loop over the sections, and save them in scn
@@ -98,27 +101,24 @@ void print_details(char *filename, csh handle)
         {
             // Use the function to get flag names
             const char *flag_names = get_flags_names(shdr.sh_flags);
-            // printf("%ld", shdr.sh_flags);
-            // printf("%s\n", flag_names);
 
             printf("\n[%2d] %-20s %-16s %-16lx %-16lx %-16lx %-4s\n", s_index++,
                    elf_strptr(elf, shstrndx, shdr.sh_name),
-                   get_section_type(shdr.sh_type), shdr.sh_addr, shdr.sh_offset, shdr.sh_size, flag_names);
+                   get_section_type(shdr.sh_type), shdr.sh_addr, shdr.sh_offset, shdr.sh_size, flag_names); // Print the header
 
             // Disassembly
             Elf_Data *data = NULL;
             size_t n = 0;
 
             data = elf_getdata(scn, data);
-            // printf("Size of data: %ld\n", data->d_size);
             disas(handle, data->d_buf, data->d_size);
         }
         /* Locate symbol table.  */
         if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab")) // strcmp returns 0 if it finds ".symtab", so it will enter if it finds it
-            symtab = scn;
+            symtab = scn;                                                // Save the section where the symbol table is, so we can print it at the end
     }
 
-    print_symbol_table(elf, symtab);
+    print_symbol_table(elf, symtab); // Print the symbol table
 }
 
 int main(int argc, char *argv[])

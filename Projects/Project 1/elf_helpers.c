@@ -55,6 +55,7 @@ const char *get_flags_names(unsigned long flags)
 
 const char *get_symbol_type(unsigned char st_info)
 {
+    // Even if only the STT_FUNC is used, this function returns the appropriate type
     switch (ELF64_ST_TYPE(st_info))
     {
     case STT_NOTYPE:
@@ -62,7 +63,7 @@ const char *get_symbol_type(unsigned char st_info)
     case STT_OBJECT:
         return "OBJECT";
     case STT_FUNC:
-        return "FUNC";
+        return "FUNCTION";
     case STT_SECTION:
         return "SECTION";
     case STT_FILE:
