@@ -69,15 +69,16 @@ void disas_file(char *filename, csh handle)
         if (gelf_getshdr(scn, &shdr) != &shdr)
             DIE("(getshdr) %s", elf_errmsg(-1));
 
-        /* Locate .text  */
-        if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".text"))
+        /* Disassemble only executable sections */
+        if ((shdr.sh_flags & SHF_EXECINSTR) && (shdr.sh_type == SHT_PROGBITS))
         {
             Elf_Data *data = NULL;
             size_t n = 0;
 
             // while (n < shdr.sh_size && (data = elf_getdata(scn, data)) != NULL) {
             data = elf_getdata(scn, data);
-            fprintf(stderr, "Size of data: %ld\n", data->d_size);
+            printf("Disassembling section: %s\n", elf_strptr(elf, shstrndx, shdr.sh_name));
+
             disas(handle, data->d_buf, data->d_size);
             // }
         }
@@ -86,18 +87,22 @@ void disas_file(char *filename, csh handle)
 
 int main(int argc, char *argv[])
 {
+    if (argc < 2)
+        DIE("usage: elfloader <filename>");
 
-    /* Initialize the engine.  */
+    /* Initialize the disassembler. */
     csh handle;
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
-        return -1;
+        DIE("Failed to initialize disassembler");
 
-    /* AT&T */
+    /* Set disassembler options. */
     cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
 
+    /* Disassemble the file. */
     disas_file(argv[1], handle);
 
+    /* Close the disassembler. */
     cs_close(&handle);
 
-    return 1;
+    return 0;
 }

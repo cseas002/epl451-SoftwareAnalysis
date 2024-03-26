@@ -12,13 +12,13 @@
 #include "elf_helpers.h"
 #include <capstone/capstone.h>
 
-void disas(csh handle, const unsigned char *buffer, unsigned int size)
+void disas(csh handle, const unsigned char *buffer, unsigned int size, uint64_t start_address)
 {
     cs_insn *insn;
     size_t count;
 
     printf("Size: %d\n", size);
-    count = cs_disasm(handle, buffer, size, 0x0, 0, &insn);
+    count = cs_disasm(handle, buffer, size, start_address, 0, &insn);
 
     printf("Instructions: %ld\n", count);
     if (count > 0)
@@ -26,7 +26,7 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size)
         size_t j;
         for (j = 0; j < count; j++)
         {
-            printf("0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+            printf("0x%08lx:\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
                    insn[j].op_str);
         }
         cs_free(insn, count);
@@ -60,7 +60,7 @@ void print_symbol_table(Elf *elf, Elf_Scn *scn)
         gelf_getsym(data, i, &sym);
         // If the symbol type is a function, then print it. I used helper functions to print the names instead of the numbers
         if (ELF64_ST_TYPE(sym.st_info) == STT_FUNC)
-            printf("[%4d] %-16lx %-16s %-16s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
+            printf("[%4d] 0x%014lx %-16s %-16s %s\n", i, sym.st_value, get_symbol_type(sym.st_info), get_symbol_binding(sym.st_info), elf_strptr(elf, shdr.sh_link, sym.st_name));
     }
 }
 
@@ -102,7 +102,7 @@ void print_details(char *filename, csh handle)
             // Use the function to get flag names
             const char *flag_names = get_flags_names(shdr.sh_flags);
 
-            printf("\n[%2d] %-20s %-16s %-16lx %-16lx %-16lx %-4s\n", s_index++,
+            printf("\n[%2d] %-20s %-16s 0x%014lx 0x%-14lx %-16lx %-4s\n", s_index++,
                    elf_strptr(elf, shstrndx, shdr.sh_name),
                    get_section_type(shdr.sh_type), shdr.sh_addr, shdr.sh_offset, shdr.sh_size, flag_names); // Print the header
 
@@ -111,11 +111,20 @@ void print_details(char *filename, csh handle)
             size_t n = 0;
 
             data = elf_getdata(scn, data);
-            disas(handle, data->d_buf, data->d_size);
+            disas(handle, data->d_buf, data->d_size, shdr.sh_addr);
         }
+
         /* Locate symbol table.  */
-        if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab")) // strcmp returns 0 if it finds ".symtab", so it will enter if it finds it
-            symtab = scn;                                                // Save the section where the symbol table is, so we can print it at the end
+        // We can either locate the .symtab section, or find the section that has sh_type SHT_SYMTAB (0x2)
+        // The user can alter the name of the symtab section, so the best way to do it the second one
+
+        // OLD IMPLEMENTATION:
+        // if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab")) // strcmp returns 0 if it finds ".symtab", so it will enter if it finds it
+        //     symtab = scn;                                                // Save the section where the symbol table is, so we can print it at the end
+
+        // NEW SHT_SYMTAB IMPLEMENTATION:
+        if (shdr.sh_type == SHT_SYMTAB)
+            symtab = scn;
     }
 
     print_symbol_table(elf, symtab); // Print the symbol table
