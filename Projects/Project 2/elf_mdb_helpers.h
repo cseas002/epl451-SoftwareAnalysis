@@ -35,7 +35,7 @@ const char *get_symbol_binding(unsigned char st_info);
 const char *get_section_type(unsigned int sh_type);
 
 // Function to get the symbol address
-long getSymbolAddress(char *symbol);
+long getSymbolAddress(char *symbol, Elf *elf, Elf_Scn *symtab);
 
 // Function to get symbol table
 Elf_Scn *getSymbolTable(Elf *elf);

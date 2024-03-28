@@ -27,7 +27,7 @@
         exit(EXIT_FAILURE);                     \
     } while (0)
 
-#define BREAKPOINT_ADDR 0x0000000000401838
+#define BREAKPOINT_ADDR 0x000000000001177
 
 // Function to prepend "./" to program name if not already present
 char *prepend_current_directory(const char *program)
@@ -65,15 +65,33 @@ long set_breakpoint(int pid, long addr)
 {
     /* Backup current code.  */
     long previous_code = 0;
-    previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)BREAKPOINT_ADDR, 0);
+    previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (previous_code == -1)
-        die("setting breakpoint (peekdata) %s", strerror(errno));
+    {
+        fprintf(stderr, "%d\n", errno);
+        // Check errno for more specific error information
+        switch (errno)
+        {
+        case EFAULT:
+            die("Error setting breakpoint (peekdata): Invalid address or access violation");
+            break;
+        case ESRCH:
+            die("Error setting breakpoint (peekdata): Process does not exist or has terminated");
+            break;
+        case EIO:
+            die("Error setting breakpoint (peekdata): Input/output error");
+            break;
+        // Handle other possible error codes...
+        default:
+            die("Error setting breakpoint (peekdata): %s", strerror(errno));
+        }
+    }
 
-    fprintf(stderr, "0x%p: 0x%lx\n", (void *)BREAKPOINT_ADDR, previous_code);
+    fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, previous_code);
 
     /* Insert the breakpoint. */
     long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)BREAKPOINT_ADDR, (void *)trap) == -1)
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
         die("(pokedata) %s", strerror(errno));
 
     /* Resume process.  */
@@ -128,14 +146,30 @@ int run_gdb(pid_t pid, csh handle, char *filename)
 
     Elf_Scn *symtab = getSymbolTable(elf); // Not that this might be NULL
 
+    if (!symtab)
+        fprintf(stderr, "Symbol table not found\n");
+
     /* Code that is run by the parent.  */
     ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
     waitpid(pid, 0, 0);
 
-    long address = getSymbolAddress("main");
+    char *symbol = "main";
+    long address = getSymbolAddress(symbol, elf, symtab);
+
+    if (!address)
+    {
+        // TODO Add here a question whether to bind later
+        fprintf(stderr, "The symbol %s has not been found.\n", symbol);
+    }
+    else
+    {
+        printf("Breakpoint set on address 0x%lx\n", address);
+    }
+
     // long address = 10;
     long original_instruction = set_breakpoint(pid, address);
 
+    printf("AAAA\n");
     waitpid(pid, 0, 0);
 
     /* We are in the breakpoint.  */
