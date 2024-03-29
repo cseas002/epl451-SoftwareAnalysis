@@ -24,17 +24,17 @@
 #define EXIT 1
 #define NOT_EXIT 0
 
-#define BREAKPOINT_ADDR 0x000000000001177
-
 typedef struct breakpoint
 {
     long address;
     long instruction;
+    unsigned int number;
 } BREAKPOINT;
 
 // This could be a C++ map
-BREAKPOINT *breakpoints = NULL; // Global array of structs
-int breakpoints_count = 0;      // Number of elements currently in the array
+BREAKPOINT *breakpoints = NULL;          // Global array of structs
+int breakpoints_count = 0;               // Number of elements currently in the array
+unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint number
 
 // Function to prepend "./" to program name if not already present
 char *prepend_current_directory(const char *program)
@@ -54,6 +54,18 @@ char *prepend_current_directory(const char *program)
     }
 }
 
+bool ret_ins(cs_insn insn)
+{
+    // Check if the mnemonic contains "ret"
+    if (strstr(insn.mnemonic, "ret") != NULL)
+    {
+        return true; // Return true if "ret" is found in the mnemonic
+    }
+    else
+    {
+        return false; // Return false otherwise
+    }
+}
 void disassemble(const uint8_t *code, size_t size, long start_address, int ins_count)
 {
     csh handle;
@@ -73,8 +85,16 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
     {
         for (size_t j = 0; j < count; j++)
         {
-            printf("0x%lx:\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
-                   insn[j].op_str);
+            if (j == 0)
+                printf("=> ");
+            else
+                printf("   ");
+
+            printf("\033[0;34m0x%lx:\033[0m ", insn[j].address);
+            printf("\033[0m<+%ld>:\t", insn[j].address - start_address);
+            printf("\033[0;32m%s\t\033[0;31m%s\033[0m\n", insn[j].mnemonic, insn[j].op_str);
+            if (ret_ins(insn[j]))
+                break;
         }
         cs_free(insn, count);
     }
@@ -83,6 +103,7 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
     }
 
+    printf("End of assembler dump.\n");
     cs_close(&handle);
 }
 
@@ -112,7 +133,7 @@ void process_inspect(int pid, struct user_regs_struct regs)
     }
 
     // Disassemble the read data
-    disassemble(binary_data, total_size, regs.rip, 16);
+    disassemble(binary_data, total_size, regs.rip, 10);
     // Clean up
     free(binary_data);
 }
@@ -217,7 +238,7 @@ int serve_breakpoint(int pid)
     // This will return the breakpoint, with the original instruction as the instruction
     BREAKPOINT *brkpoint = get_original_breakpoint(regs.rip);
 
-    printf("Breakpoint 1, 0x%lx\n", brkpoint->address);
+    printf("Breakpoint %d, \033[0;34m0x%lx\033[0m\n", brkpoint->number, brkpoint->address);
 
     if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
@@ -297,6 +318,7 @@ void add_breakpoint(long address, long original_instruction)
     // Assign the values to the new instruction
     breakpoints[breakpoints_count - 1].address = address;
     breakpoints[breakpoints_count - 1].instruction = original_instruction;
+    breakpoints[breakpoints_count - 1].number = next_breakpoint_number++;
     // breakpoints[breakpoints_count - 1].ignore = ignore;
 }
 
@@ -380,6 +402,7 @@ int run_gdb(char **argv)
             {
                 if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
                     DIE("(cont) %s", strerror(errno));
+                process_is_running = true;
             }
             else
             {
@@ -389,9 +412,15 @@ int run_gdb(char **argv)
         // Run the child program
         else if (strncmp(command, "r", strlen("r")) == 0)
         {
+            if (process_started)
+            {
+                printf("Process is already running\n");
+                continue;
+            }
             process_is_running = true;
             process_started = true;
             run_tracee_program(&pid, &elf, &symtab, argv);
+            printf("Starting program: %s\n\n", argv[1]);
             // for (int i = 0; i < breakpoints_count; i++)
             //     set_breakpoint(pid, breakpoints[i].address);
         }
@@ -426,7 +455,7 @@ int run_gdb(char **argv)
             }
             else
             {
-                printf("Breakpoint set on address 0x%lx\n", address);
+                printf("Breakpoint %d at \033[0;34m0x%lx\033[0m\n", next_breakpoint_number, address);
                 // fflush(stdout); // Flush stdout to ensure the message is displayed immediately
             }
             long instruction = 0;
