@@ -60,8 +60,8 @@ void disas(const uint8_t *code, size_t size, int ins_count, long start_address)
     cs_insn *insn;
     size_t count;
 
-    for (int i = 0; i < 5; i++)
-        printf("%d\n", code[i]);
+    for (int i = 0; i < 16; i++)
+        printf("%x ", code[i]);
     // Disassemble the specified number of instructions from the binary data
     count = cs_disasm(handle, code, ins_count, 0, ins_count, &insn);
 
@@ -80,14 +80,10 @@ void disas(const uint8_t *code, size_t size, int ins_count, long start_address)
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
 }
 
-void process_inspect(int pid)
+void process_inspect(int pid, struct user_regs_struct regs)
 {
-    struct user_regs_struct regs;
     const size_t chunk_size = 4;  // Read 4 bytes at a time
     const size_t total_size = 16; // Read a total of 16 bytes
-
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        DIE("%s", strerror(errno));
 
     // Read 16 bytes of data from the memory address pointed to by regs.rip
     uint8_t *binary_data = (uint8_t *)malloc(16); // Read 16 bytes, adjust as needed
@@ -110,7 +106,7 @@ void process_inspect(int pid)
     }
 
     // Disassemble the read data
-    disas(binary_data, total_size, 1, regs.rip);
+    disas(binary_data, total_size, 16, regs.rip);
 
     // Clean up
     free(binary_data);
@@ -119,18 +115,18 @@ void process_inspect(int pid)
 long set_breakpoint(int pid, long addr)
 {
     /* Backup current code.  */
-    long prev_code_instruction = 0;
+    long original_ins = 0;
 
-    prev_code_instruction = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
-    if (prev_code_instruction == -1)
+    original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
+    if (original_ins == -1)
     {
         DIE("Error setting breakpoint (peekdata): %s", strerror(errno));
     }
 
-    // fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, prev_code_instruction);
+    // fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, original_ins);
 
     /* Insert the breakpoint. */
-    long trap = (prev_code_instruction & 0xFFFFFFFFFFFFFF00) | 0xCC;
+    long trap = (original_ins & 0xFFFFFFFFFFFFFF00) | 0xCC;
     if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
         DIE("(pokedata) %s", strerror(errno));
 
@@ -138,7 +134,17 @@ long set_breakpoint(int pid, long addr)
     // if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
     //     DIE("(cont) %s", strerror(errno));
 
-    return prev_code_instruction;
+    for (int i = 0; i < breakpoints_count; i++)
+    {
+        if (breakpoints[i].address == addr)
+        {
+            printf("AAAADDRESS %lx\n", addr);
+            printf("AAAAAA %lx\n", original_ins);
+            breakpoints[i].instruction = original_ins;
+        }
+    }
+
+    return original_ins;
 }
 
 // void process_step(int pid)
@@ -170,16 +176,21 @@ int serve_breakpoint(int pid)
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         DIE("(getregs) %s", strerror(errno));
 
-    // This will return the breakpoint, with the original instruction as the instruction
-    BREAKPOINT *ins = get_original_breakpoint(regs.rip - 1);
+    regs.rip--; // Move the regs.rip one place back
 
-    process_inspect(pid);
+    // This will return the breakpoint, with the original instruction as the instruction
+    BREAKPOINT *brkpoint = get_original_breakpoint(regs.rip);
+
+    fprintf(stderr, "Original ins: %lx.\n", brkpoint->instruction);
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
+        DIE("(pokedata) %s", strerror(errno));
+
+    process_inspect(pid, regs);
     getchar();
 
     fprintf(stderr, "Resuming.\n");
 
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)ins->address, (void *)ins->instruction) == -1)
-        DIE("(pokedata) %s", strerror(errno));
+    regs.rip--; // Go back one instruction
 
     // regs.rip = addr;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
@@ -196,7 +207,7 @@ int serve_breakpoint(int pid)
 
     // printf("%lx\n", regs.rip);
 
-    set_breakpoint(pid, ins->address);
+    set_breakpoint(pid, brkpoint->address);
 
     return NOT_EXIT;
 }
