@@ -35,7 +35,6 @@ typedef struct breakpoint
 // This could be a C++ map
 BREAKPOINT *breakpoints = NULL; // Global array of structs
 int breakpoints_count = 0;      // Number of elements currently in the array
-csh handle;
 
 // Function to prepend "./" to program name if not already present
 char *prepend_current_directory(const char *program)
@@ -55,38 +54,45 @@ char *prepend_current_directory(const char *program)
     }
 }
 
-void disas(const uint8_t *code, size_t size, int ins_count, long start_address)
+void disassemble(const uint8_t *code, size_t size, long start_address, int ins_count)
 {
+    csh handle;
     cs_insn *insn;
-    size_t count;
 
-    for (int i = 0; i < 16; i++)
-        printf("%x ", code[i]);
-    // Disassemble the specified number of instructions from the binary data
-    count = cs_disasm(handle, code, ins_count, 0, ins_count, &insn);
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
+    {
+        fprintf(stderr, "Error: Failed to initialize Capstone\n");
+        return;
+    }
 
-    printf("Instructions: %ld\n", count);
+    // Set Capstone to use AT&T syntax
+    cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
+
+    size_t count = cs_disasm(handle, code, size, start_address, 0, &insn);
     if (count > 0)
     {
-        size_t j;
-        for (j = 0; j < count; j++)
+        for (size_t j = 0; j < count; j++)
         {
-            printf("0x%08lx:\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+            printf("0x%lx:\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
                    insn[j].op_str);
         }
         cs_free(insn, count);
     }
     else
+    {
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
+    }
+
+    cs_close(&handle);
 }
 
 void process_inspect(int pid, struct user_regs_struct regs)
 {
-    const size_t chunk_size = 4;  // Read 4 bytes at a time
-    const size_t total_size = 16; // Read a total of 16 bytes
+    const size_t chunk_size = 4;      // Read 4 bytes at a time
+    const size_t total_size = 16 * 4; // Read a total of 16 chunks
 
-    // Read 16 bytes of data from the memory address pointed to by regs.rip
-    uint8_t *binary_data = (uint8_t *)malloc(16); // Read 16 bytes, adjust as needed
+    // Read total_size bytes of data from the memory address pointed to by regs.rip
+    uint8_t *binary_data = (uint8_t *)malloc(total_size);
     if (!binary_data)
     {
         fprintf(stderr, "ERROR: Memory allocation failed!\n");
@@ -106,8 +112,7 @@ void process_inspect(int pid, struct user_regs_struct regs)
     }
 
     // Disassemble the read data
-    disas(binary_data, total_size, 16, regs.rip);
-
+    disassemble(binary_data, total_size, regs.rip, 16);
     // Clean up
     free(binary_data);
 }
@@ -138,8 +143,6 @@ long set_breakpoint(int pid, long addr)
     {
         if (breakpoints[i].address == addr)
         {
-            printf("AAAADDRESS %lx\n", addr);
-            printf("AAAAAA %lx\n", original_ins);
             breakpoints[i].instruction = original_ins;
         }
     }
@@ -147,14 +150,47 @@ long set_breakpoint(int pid, long addr)
     return original_ins;
 }
 
-// void process_step(int pid)
-// {
+void disas(pid_t pid)
+{
+    struct user_regs_struct regs;
+    // Now, register rip (instruction pointer) has the address of the breakpoint
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        DIE("(getregs) %s", strerror(errno));
 
-//     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-//         DIE("(singlestep) %s", strerror(errno));
+    process_inspect(pid, regs);
+}
 
-//     waitpid(pid, 0, 0);
-// }
+void continue_process(pid_t pid)
+{
+    fprintf(stderr, "Resuming.\n");
+
+    struct user_regs_struct regs;
+    // Get registers
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        DIE("(getregs) %s", strerror(errno));
+
+    // Execute the instruction, and read the previous instruction's breakpoint
+    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+        DIE("(singlestep) %s", strerror(errno));
+
+    waitpid(pid, 0, 0);
+
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        DIE("(getregs) %s", strerror(errno));
+
+    // printf("%lx\n", regs.rip);
+
+    // Set the breakpoint back
+    set_breakpoint(pid, regs.rip);
+}
+
+void step_instruction(pid_t pid)
+{
+    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+        DIE("(singlestep) %s", strerror(errno));
+
+    waitpid(pid, 0, 0);
+}
 
 BREAKPOINT *get_original_breakpoint(long address)
 {
@@ -181,33 +217,14 @@ int serve_breakpoint(int pid)
     // This will return the breakpoint, with the original instruction as the instruction
     BREAKPOINT *brkpoint = get_original_breakpoint(regs.rip);
 
-    fprintf(stderr, "Original ins: %lx.\n", brkpoint->instruction);
+    printf("Breakpoint 1, 0x%lx\n", brkpoint->address);
+
     if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
-
-    process_inspect(pid, regs);
-    getchar();
-
-    fprintf(stderr, "Resuming.\n");
-
-    regs.rip--; // Go back one instruction
 
     // regs.rip = addr;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         DIE("(setregs) %s", strerror(errno));
-
-    // Execute the instruction, and read the previous instruction's breakpoint
-    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-        DIE("(singlestep) %s", strerror(errno));
-
-    waitpid(pid, 0, 0);
-
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        DIE("(getregs) %s", strerror(errno));
-
-    // printf("%lx\n", regs.rip);
-
-    set_breakpoint(pid, brkpoint->address);
 
     return NOT_EXIT;
 }
@@ -218,13 +235,13 @@ void show_initial_console_messaage()
     printf("Type \"apropos word\" to search for commands related to \"word\"...\n");
     printf("Reading symbols from test...\n");
     printf("(No debugging symbols found in test)\n");
-    fflush(stdout);
+    // fflush(stdout);
 }
 
 void show_console()
 {
     printf("(gdb) ");
-    fflush(stdout); // Flush the output to ensure it's displayed immediately
+    // fflush(stdout); // Flush the output to ensure it's displayed immediately
 }
 
 void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv)
@@ -309,13 +326,14 @@ bool arg_is_symbol(char *arg)
     return true;
 }
 
-int run_gdb(csh handle, char **argv)
+int run_gdb(char **argv)
 {
     char command[MAX_COMMAND_LENGTH];
     Elf *elf = NULL;
     Elf_Scn *symtab = NULL;
     pid_t pid;
     bool process_is_running = false;
+    bool process_started = false;
 
     /* Initilization.  */
     if (elf_version(EV_CURRENT) == EV_NONE)
@@ -348,9 +366,17 @@ int run_gdb(csh handle, char **argv)
         {
             printf("This is a help message.\n");
         }
+        else if (strcmp(command, "si") == 0)
+        {
+            step_instruction(pid);
+        }
+        else if (strcmp(command, "disas") == 0)
+        {
+            disas(pid);
+        }
         else if (strncmp(command, "c", strlen("c")) == 0)
         {
-            if (process_is_running)
+            if (process_started)
             {
                 if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
                     DIE("(cont) %s", strerror(errno));
@@ -364,6 +390,7 @@ int run_gdb(csh handle, char **argv)
         else if (strncmp(command, "r", strlen("r")) == 0)
         {
             process_is_running = true;
+            process_started = true;
             run_tracee_program(&pid, &elf, &symtab, argv);
             // for (int i = 0; i < breakpoints_count; i++)
             //     set_breakpoint(pid, breakpoints[i].address);
@@ -400,10 +427,10 @@ int run_gdb(csh handle, char **argv)
             else
             {
                 printf("Breakpoint set on address 0x%lx\n", address);
-                fflush(stdout); // Flush stdout to ensure the message is displayed immediately
+                // fflush(stdout); // Flush stdout to ensure the message is displayed immediately
             }
             long instruction = 0;
-            if (process_is_running)
+            if (process_started)
             {
                 instruction = set_breakpoint(pid, address);
             }
@@ -418,7 +445,6 @@ int run_gdb(csh handle, char **argv)
         else if (command_is_empty(command))
         {
             // Do nothing and continue to prompt
-            continue;
         }
         else
         {
@@ -434,9 +460,9 @@ int run_gdb(csh handle, char **argv)
             /* We are in the breakpoint.  */
             if (serve_breakpoint(pid) == EXIT)
             {
-                process_is_running = false;
-                continue;
+                printf("EXITED\n");
             }
+            process_is_running = false;
         }
     }
     return 0;
@@ -447,6 +473,8 @@ int main(int argc, char **argv)
     if (argc <= 1)
         DIE("Usage: %s <program>", argv[0]);
 
+    csh handle;
+
     /* Initialize the engine.  */
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
         return -1;
@@ -456,7 +484,7 @@ int main(int argc, char **argv)
 
     cs_close(&handle);
 
-    run_gdb(handle, argv);
+    run_gdb(argv);
 
     cleanup_breakpoints();
 
