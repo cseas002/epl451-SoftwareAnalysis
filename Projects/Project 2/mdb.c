@@ -65,26 +65,11 @@ long set_breakpoint(int pid, long addr)
 {
     /* Backup current code.  */
     long previous_code = 0;
+
     previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (previous_code == -1)
     {
-        fprintf(stderr, "%d\n", errno);
-        // Check errno for more specific error information
-        switch (errno)
-        {
-        case EFAULT:
-            die("Error setting breakpoint (peekdata): Invalid address or access violation");
-            break;
-        case ESRCH:
-            die("Error setting breakpoint (peekdata): Process does not exist or has terminated");
-            break;
-        case EIO:
-            die("Error setting breakpoint (peekdata): Input/output error");
-            break;
-        // Handle other possible error codes...
-        default:
-            die("Error setting breakpoint (peekdata): %s", strerror(errno));
-        }
+        die("Error setting breakpoint (peekdata): %s", strerror(errno));
     }
 
     fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, previous_code);
@@ -151,6 +136,7 @@ int run_gdb(pid_t pid, csh handle, char *filename)
 
     /* Code that is run by the parent.  */
     ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
+
     waitpid(pid, 0, 0);
 
     char *symbol = "main";
@@ -169,7 +155,6 @@ int run_gdb(pid_t pid, csh handle, char *filename)
     // long address = 10;
     long original_instruction = set_breakpoint(pid, address);
 
-    printf("AAAA\n");
     waitpid(pid, 0, 0);
 
     /* We are in the breakpoint.  */

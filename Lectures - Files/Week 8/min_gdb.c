@@ -24,7 +24,7 @@
         exit(EXIT_FAILURE);                     \
     } while (0)
 
-#define BREAKPOINT_ADDR 0x0000000000401838
+#define BREAKPOINT_ADDR 0x0000000000001177
 
 void process_inspect(int pid)
 {
