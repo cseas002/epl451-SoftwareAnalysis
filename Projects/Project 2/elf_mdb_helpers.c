@@ -9,7 +9,6 @@ Elf_Scn *getSymbolTable(Elf *elf)
     if (elf_getshdrstrndx(elf, &shstrndx) != 0) // Get section header string index, and save it shstrndx
         DIE("(getshdrstrndx) %s", elf_errmsg(-1));
 
-    int s_index = 0;
     while ((scn = elf_nextscn(elf, scn)) != NULL) // Loop over the sections, and save them in scn
     {
         if (gelf_getshdr(scn, &shdr) != &shdr) // Get the section header and save it in shdr
@@ -50,44 +49,44 @@ long getSymbolAddress(char *symbol, Elf *elf, Elf_Scn *symtab)
 }
 
 // This is from readelf.c (https://github.com/bminor/binutils-gdb/blob/8bbce0c70250334f436b4e52983f3538d3bdb9ce/binutils/readelf.c#L5931)
-const char *get_flags_names(unsigned long flags)
-{
-    // Define some common ELF section flags
-    static const struct
-    {
-        unsigned long flag;
-        const char *name;
-    } flag_mapping[] = {
-        {SHF_WRITE, "W"},
-        {SHF_ALLOC, "A"},
-        {SHF_EXECINSTR, "X"},
-        {SHF_MERGE, "M"},
-        {SHF_STRINGS, "S"},
-        {SHF_INFO_LINK, "I"},
-        {SHF_LINK_ORDER, "L"},
-        {SHF_OS_NONCONFORMING, "O"},
-        {SHF_GROUP, "G"},
-        {SHF_TLS, "T"},
-        {SHF_EXCLUDE, "E"},
-        {SHF_COMPRESSED, "C"}};
+// const char *get_flags_names(unsigned long flags)
+// {
+//     // Define some common ELF section flags
+//     static const struct
+//     {
+//         unsigned long flag;
+//         const char *name;
+//     } flag_mapping[] = {
+//         {SHF_WRITE, "W"},
+//         {SHF_ALLOC, "A"},
+//         {SHF_EXECINSTR, "X"},
+//         {SHF_MERGE, "M"},
+//         {SHF_STRINGS, "S"},
+//         {SHF_INFO_LINK, "I"},
+//         {SHF_LINK_ORDER, "L"},
+//         {SHF_OS_NONCONFORMING, "O"},
+//         {SHF_GROUP, "G"},
+//         {SHF_TLS, "T"},
+//         {SHF_EXCLUDE, "E"},
+//         {SHF_COMPRESSED, "C"}};
 
-    // Allocate a buffer for storing flag names
-    char *flag_names = malloc(strlen("RWX") + 1);
-    if (!flag_names)
-        DIE("Memory allocation failed");
+//     // Allocate a buffer for storing flag names
+//     char *flag_names = malloc(strlen("RWX") + 1);
+//     if (!flag_names)
+//         DIE("Memory allocation failed");
 
-    // Initialize the buffer
-    flag_names[0] = '\0';
+//     // Initialize the buffer
+//     flag_names[0] = '\0';
 
-    // Check each flag and append its name to the buffer if present
-    for (size_t i = 0; i < sizeof(flag_mapping) / sizeof(flag_mapping[0]); ++i)
-    {
-        if (flags & flag_mapping[i].flag)
-            strcat(flag_names, flag_mapping[i].name);
-    }
+//     // Check each flag and append its name to the buffer if present
+//     for (size_t i = 0; i < sizeof(flag_mapping) / sizeof(flag_mapping[0]); ++i)
+//     {
+//         if (flags & flag_mapping[i].flag)
+//             strcat(flag_names, flag_mapping[i].name);
+//     }
 
-    return flag_names;
-}
+//     return flag_names;
+// }
 
 const char *get_symbol_type(unsigned char st_info)
 {
