@@ -40,7 +40,7 @@ unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint numbe
 
 typedef struct
 {
-    Elf64_Addr start_address;
+    Elf64_Addr current_address;
     Elf64_Addr end_address;
     const char *name;
 } FunctionInfo;
@@ -71,7 +71,7 @@ void disassemble_function(Elf *elf, Elf_Scn *scn, GElf_Shdr *shdr, FunctionInfo 
     if (count > 0)
     {
         // Update function info with start and end addresses
-        function->start_address = insn[0].address;
+        function->current_address = insn[0].address;
         function->end_address = insn[count - 1].address + insn[count - 1].size;
         cs_free(insn, count);
     }
@@ -87,10 +87,12 @@ Elf64_Sym *find_address_function(Elf *elf, Elf64_Addr address, char **function_n
     GElf_Shdr shdr;
     size_t shstrndx;
     const char *section_name;
-    Elf64_Sym *symtab;
+    Elf64_Sym *symtab = NULL;
     char *sym_name;
     Elf_Data *sym_data;
     size_t sym_num, i;
+
+    // return symtab;
 
     // Get the section name string table index
     elf_getshdrstrndx(elf, &shstrndx);
@@ -145,8 +147,12 @@ Elf64_Sym *find_address_function(Elf *elf, Elf64_Addr address, char **function_n
                 // Check if the symbol contains the address
                 if (address >= symtab[i].st_value && address < symtab[i].st_value + symtab[i].st_size)
                 {
-                    *function_name = malloc(sizeof(char) * (strlen(sym_name) + 1));
-                    strcpy(*function_name, sym_name);
+                    if (function_name)
+                    {
+                        *function_name = malloc(sizeof(char) * (strlen(sym_name) + 1));
+                        strcpy(*function_name, sym_name);
+                    }
+
                     return &symtab[i]; // return the symbol's details
                 }
             }
@@ -187,8 +193,16 @@ bool ret_ins(cs_insn insn)
     }
 }
 
-void disassemble(const uint8_t *code, size_t size, long start_address, int ins_count, Elf *elf)
+void disassemble(const uint8_t *code, size_t size, long current_address, int ins_count, Elf *elf, char *function_name, Elf64_Sym *function_start)
 {
+    long function_start_address = current_address;
+
+    if (function_start)
+    {
+        printf("Dump of assembler code for function \033[0;33m%s\033[0m:\n", function_name);
+        function_start_address = function_start->st_value;
+    }
+
     csh handle;
     cs_insn *insn, *insn_to_be_printed;
 
@@ -202,18 +216,6 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
     // cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
     // or, set Capstone to use AT&T syntax
     cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
-
-    char *function_name = NULL;
-    Elf64_Sym *function_start = NULL;
-    function_start = find_address_function(elf, start_address, &function_name);
-
-    long function_start_address = start_address;
-
-    if (function_start)
-    {
-        printf("Dump of assembler code for function \033[0;33m%s\033[0m:\n", function_name);
-        function_start_address = function_start->st_value;
-    }
 
     // Disassemble the instructions starting from the function start,
     // and print 4 instructions prior the the start address, the start address instruction, and 5 after
@@ -229,7 +231,7 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
         {
             printf("address: %lx\n", insn[j].address);
             // If the start address is found
-            if (insn[j].address == start_address)
+            if (insn[j].address == current_address)
             {
                 int start_from;
                 // Copy the 4 prior elements, and the current one
@@ -251,7 +253,7 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
         {
             for (int i = 0; i < count2; i++)
             {
-                if (insn_to_be_printed[i].address == start_address)
+                if (insn_to_be_printed[i].address == current_address)
                     printf("=> ");
                 else
                     printf("   ");
@@ -279,7 +281,7 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
 void process_inspect(int pid, struct user_regs_struct regs, Elf *elf)
 {
     const size_t chunk_size = 4;      // Read 4 bytes at a time
-    const size_t total_size = 16 * 4; // Read a total of 16 chunks
+    const size_t total_size = 40 * 4; // Read a total of 40 chunks
 
     // Read total_size bytes of data from the memory address pointed to by regs.rip
     uint8_t *binary_data = (uint8_t *)malloc(total_size);
@@ -289,9 +291,19 @@ void process_inspect(int pid, struct user_regs_struct regs, Elf *elf)
         return;
     }
 
+    long current_address = regs.rip;
+    long function_start_address = current_address;
+    char *function_name = NULL;
+    Elf64_Sym *function_start = find_address_function(elf, current_address, &function_name);
+
+    // If no function start found, then the function start is the current_address
+    if (function_start)
+        function_start_address = function_start->st_value;
+
+    // Load the data from the function start;
     for (size_t offset = 0; offset < total_size; offset += chunk_size)
     {
-        long data = ptrace(PTRACE_PEEKDATA, pid, regs.rip + offset, 0);
+        long data = ptrace(PTRACE_PEEKDATA, pid, function_start_address + offset, 0);
         if (data == -1)
         {
             fprintf(stderr, "ERROR: Failed to peek data from process memory: %s\n", strerror(errno));
@@ -300,8 +312,9 @@ void process_inspect(int pid, struct user_regs_struct regs, Elf *elf)
         }
         memcpy(binary_data + offset, &data, sizeof(data));
     }
+
     // Disassemble the read data
-    disassemble(binary_data, total_size, regs.rip, MAX_INS_FROM_FUNC_START, elf);
+    disassemble(binary_data, total_size, current_address, MAX_INS_FROM_FUNC_START, elf, function_name, function_start);
     // Clean up
     free(binary_data);
 }
@@ -311,6 +324,7 @@ long set_breakpoint(int pid, long addr)
     /* Backup current code.  */
     long original_ins = 0;
 
+    printf("(0x%lx in )\n", addr);
     original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (original_ins == -1)
     {

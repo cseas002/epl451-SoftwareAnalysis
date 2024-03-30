@@ -1,5 +1,5 @@
 all:
 	gcc -Wall elf_mdb_helpers.c mdb.c -lelf -lcapstone -o mdb
-	gcc -Wall test.c -no-pie -o test
+	gcc -Wall test.c -o test -no-pie
 clean:
-	rm cseas_elfloader elfloader_example
+	rm mdb test
