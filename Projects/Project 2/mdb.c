@@ -324,7 +324,7 @@ long set_breakpoint(int pid, long addr)
     /* Backup current code.  */
     long original_ins = 0;
 
-    printf("(0x%lx in )\n", addr);
+    // printf("(0x%lx in )\n", addr);
     original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (original_ins == -1)
     {
@@ -365,7 +365,7 @@ void disas(pid_t pid, Elf *elf)
 
 void continue_process(pid_t pid)
 {
-    fprintf(stderr, "Resuming.\n");
+    fprintf(stderr, "Continuing.\n\n");
 
     struct user_regs_struct regs;
     // Get registers
@@ -414,7 +414,7 @@ BREAKPOINT *get_original_breakpoint(long address)
     return NULL;
 }
 
-int serve_breakpoint(int pid)
+int serve_breakpoint(Elf *elf, int pid)
 {
     struct user_regs_struct regs;
     // Now, register rip (instruction pointer) has the address of the breakpoint
@@ -426,7 +426,10 @@ int serve_breakpoint(int pid)
     // This will return the breakpoint, with the original instruction as the instruction
     BREAKPOINT *brkpoint = get_original_breakpoint(regs.rip);
 
-    printf("Breakpoint %d, \033[0;34m0x%lx\033[0m\n", brkpoint->number, brkpoint->address);
+    char *function_name = "?";
+    find_address_function(elf, regs.rip, &function_name);
+
+    printf("Breakpoint %d, \033[0;34m0x%lx\033[0m in \033[0;33m%s\033[0m ()\n", brkpoint->number, brkpoint->address, function_name);
 
     if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
@@ -718,7 +721,7 @@ int run_gdb(char **argv)
             waitpid(pid, 0, 0);
 
             /* We are in the breakpoint.  */
-            if (serve_breakpoint(pid) == EXIT)
+            if (serve_breakpoint(elf, pid) == EXIT)
             {
                 printf("EXITED\n");
             }
