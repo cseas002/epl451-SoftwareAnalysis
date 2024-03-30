@@ -23,6 +23,8 @@
 #define MAX_COMMAND_LENGTH 100
 #define EXIT 1
 #define NOT_EXIT 0
+#define DISAS_INS_COUNT 10
+#define MAX_INS_FROM_FUNC_START 0 // All instructions in a function
 
 typedef struct breakpoint
 {
@@ -35,6 +37,124 @@ typedef struct breakpoint
 BREAKPOINT *breakpoints = NULL;          // Global array of structs
 int breakpoints_count = 0;               // Number of elements currently in the array
 unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint number
+
+typedef struct
+{
+    Elf64_Addr start_address;
+    Elf64_Addr end_address;
+    const char *name;
+} FunctionInfo;
+
+// Function to disassemble the function and find its start and end addresses
+void disassemble_function(Elf *elf, Elf_Scn *scn, GElf_Shdr *shdr, FunctionInfo *function)
+{
+    // Get section data
+    Elf_Data *data = elf_getdata(scn, NULL);
+    if (!data)
+    {
+        fprintf(stderr, "Failed to get section data\n");
+        return;
+    }
+
+    // Initialize Capstone
+    csh handle;
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
+    {
+        fprintf(stderr, "Failed to initialize Capstone\n");
+        return;
+    }
+
+    // Disassemble the section
+    size_t count;
+    cs_insn *insn;
+    count = cs_disasm(handle, data->d_buf + shdr->sh_offset, shdr->sh_size, shdr->sh_addr, 0, &insn);
+    if (count > 0)
+    {
+        // Update function info with start and end addresses
+        function->start_address = insn[0].address;
+        function->end_address = insn[count - 1].address + insn[count - 1].size;
+        cs_free(insn, count);
+    }
+
+    // Close Capstone
+    cs_close(&handle);
+}
+
+// Function to find the function containing the given address
+Elf64_Sym *find_address_function(Elf *elf, Elf64_Addr address, char **function_name)
+{
+    Elf_Scn *scn = NULL;
+    GElf_Shdr shdr;
+    size_t shstrndx;
+    const char *section_name;
+    Elf64_Sym *symtab;
+    char *sym_name;
+    Elf_Data *sym_data;
+    size_t sym_num, i;
+
+    // Get the section name string table index
+    elf_getshdrstrndx(elf, &shstrndx);
+
+    // Iterate through sections
+    while ((scn = elf_nextscn(elf, scn)) != NULL)
+    {
+        // Get section header
+        if (gelf_getshdr(scn, &shdr) != &shdr)
+        {
+            fprintf(stderr, "Failed to get section header\n");
+            continue;
+        }
+
+        // Get section name
+        section_name = elf_strptr(elf, shstrndx, shdr.sh_name);
+
+        if (!section_name)
+        {
+            fprintf(stderr, "Failed to get section name\n");
+            continue;
+        }
+
+        // Check if it's a symbol table section
+        if (shdr.sh_type == SHT_SYMTAB || shdr.sh_type == SHT_DYNSYM)
+        {
+            // Get symbol table data
+            sym_data = elf_getdata(scn, NULL);
+            if (!sym_data)
+            {
+                fprintf(stderr, "Failed to get symbol table data\n");
+                continue;
+            }
+
+            // Get the number of symbols
+            sym_num = shdr.sh_size / shdr.sh_entsize;
+
+            // Get the symbol table
+            symtab = (Elf64_Sym *)sym_data->d_buf;
+
+            // Iterate through symbols
+            for (i = 0; i < sym_num; ++i)
+            {
+                sym_name = elf_strptr(elf, shdr.sh_link, symtab[i].st_name);
+
+                if (!sym_name)
+                {
+                    fprintf(stderr, "Failed to get symbol name\n");
+                    continue;
+                }
+
+                // Check if the symbol contains the address
+                if (address >= symtab[i].st_value && address < symtab[i].st_value + symtab[i].st_size)
+                {
+                    *function_name = malloc(sizeof(char) * (strlen(sym_name) + 1));
+                    strcpy(*function_name, sym_name);
+                    return &symtab[i]; // return the symbol's details
+                }
+            }
+        }
+    }
+
+    return NULL; // Address not found in any function
+}
 
 // Function to prepend "./" to program name if not already present
 char *prepend_current_directory(const char *program)
@@ -66,10 +186,11 @@ bool ret_ins(cs_insn insn)
         return false; // Return false otherwise
     }
 }
-void disassemble(const uint8_t *code, size_t size, long start_address, int ins_count)
+
+void disassemble(const uint8_t *code, size_t size, long start_address, int ins_count, Elf *elf)
 {
     csh handle;
-    cs_insn *insn;
+    cs_insn *insn, *insn_to_be_printed;
 
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
     {
@@ -77,37 +198,85 @@ void disassemble(const uint8_t *code, size_t size, long start_address, int ins_c
         return;
     }
 
-    // Set Capstone to use AT&T syntax
+    // Set Capstone to use Intel syntax
+    // cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+    // or, set Capstone to use AT&T syntax
     cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
 
-    size_t count = cs_disasm(handle, code, size, start_address, 0, &insn);
+    char *function_name = NULL;
+    Elf64_Sym *function_start = NULL;
+    function_start = find_address_function(elf, start_address, &function_name);
+
+    long function_start_address = start_address;
+
+    if (function_start)
+    {
+        printf("Dump of assembler code for function \033[0;33m%s\033[0m:\n", function_name);
+        function_start_address = function_start->st_value;
+    }
+
+    // Disassemble the instructions starting from the function start,
+    // and print 4 instructions prior the the start address, the start address instruction, and 5 after
+
+    size_t count = cs_disasm(handle, code, size, function_start_address, ins_count, &insn);
+    size_t count2 = 0;
+    bool found_address = false;
+    // insn_to_be_printed = malloc(DISAS_INS_COUNT * sizeof(cs_insn));
     if (count > 0)
     {
+        // Get the instructions one by one
         for (size_t j = 0; j < count; j++)
         {
-            if (j == 0)
-                printf("=> ");
-            else
-                printf("   ");
+            printf("address: %lx\n", insn[j].address);
+            // If the start address is found
+            if (insn[j].address == start_address)
+            {
+                int start_from;
+                // Copy the 4 prior elements, and the current one
+                if (j < 4)
+                {
+                    start_from = 0;
+                }
+                else
+                {
+                    start_from = j - 4;
+                }
 
-            printf("\033[0;34m0x%lx:\033[0m ", insn[j].address);
-            printf("\033[0m<+%ld>:\t", insn[j].address - start_address);
-            printf("\033[0;32m%s\t\033[0;31m%s\033[0m\n", insn[j].mnemonic, insn[j].op_str);
-            if (ret_ins(insn[j]))
+                count2 = cs_disasm(handle, code, size, insn[start_from].address, DISAS_INS_COUNT, &insn_to_be_printed);
+                found_address = true;
                 break;
+            }
         }
-        cs_free(insn, count);
+        if (found_address)
+        {
+            for (int i = 0; i < count2; i++)
+            {
+                if (insn_to_be_printed[i].address == start_address)
+                    printf("=> ");
+                else
+                    printf("   ");
+
+                printf("\033[0;34m0x%lx:\033[0m ", insn_to_be_printed[i].address);
+                printf("\033[0m<+%ld>:\t", insn_to_be_printed[i].address - function_start_address);
+                printf("\033[0;32m%s\t\033[0;31m%s\033[0m\n", insn_to_be_printed[i].mnemonic, insn_to_be_printed[i].op_str);
+                // If you found a return instruction, then stop
+                if (ret_ins(insn_to_be_printed[i]))
+                    break;
+            }
+            cs_free(insn_to_be_printed, count2);
+        }
     }
     else
     {
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
     }
 
+    cs_free(insn, count);
     printf("End of assembler dump.\n");
     cs_close(&handle);
 }
 
-void process_inspect(int pid, struct user_regs_struct regs)
+void process_inspect(int pid, struct user_regs_struct regs, Elf *elf)
 {
     const size_t chunk_size = 4;      // Read 4 bytes at a time
     const size_t total_size = 16 * 4; // Read a total of 16 chunks
@@ -131,9 +300,8 @@ void process_inspect(int pid, struct user_regs_struct regs)
         }
         memcpy(binary_data + offset, &data, sizeof(data));
     }
-
     // Disassemble the read data
-    disassemble(binary_data, total_size, regs.rip, 10);
+    disassemble(binary_data, total_size, regs.rip, MAX_INS_FROM_FUNC_START, elf);
     // Clean up
     free(binary_data);
 }
@@ -171,14 +339,14 @@ long set_breakpoint(int pid, long addr)
     return original_ins;
 }
 
-void disas(pid_t pid)
+void disas(pid_t pid, Elf *elf)
 {
     struct user_regs_struct regs;
     // Now, register rip (instruction pointer) has the address of the breakpoint
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         DIE("(getregs) %s", strerror(errno));
 
-    process_inspect(pid, regs);
+    process_inspect(pid, regs, elf);
 }
 
 void continue_process(pid_t pid)
@@ -188,21 +356,19 @@ void continue_process(pid_t pid)
     struct user_regs_struct regs;
     // Get registers
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        DIE("(getregs) %s", strerror(errno));
+        DIE("(getregs) aaaaa %s", strerror(errno));
 
-    // Execute the instruction, and read the previous instruction's breakpoint
+    // Execute one instruction
     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
         DIE("(singlestep) %s", strerror(errno));
 
     waitpid(pid, 0, 0);
 
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        DIE("(getregs) %s", strerror(errno));
-
-    // printf("%lx\n", regs.rip);
-
     // Set the breakpoint back
     set_breakpoint(pid, regs.rip);
+
+    if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+        DIE("(cont) %s", strerror(errno));
 }
 
 void step_instruction(pid_t pid)
@@ -211,6 +377,14 @@ void step_instruction(pid_t pid)
         DIE("(singlestep) %s", strerror(errno));
 
     waitpid(pid, 0, 0);
+
+    struct user_regs_struct regs;
+    // Get registers
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        DIE("(getregs) %s", strerror(errno));
+
+    printf("RIP: %llx\n", regs.rip);
+    // waitpid(pid, 0, 0);
 }
 
 BREAKPOINT *get_original_breakpoint(long address)
@@ -233,7 +407,7 @@ int serve_breakpoint(int pid)
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         DIE("(getregs) %s", strerror(errno));
 
-    regs.rip--; // Move the regs.rip one place back
+    regs.rip--; // Set the instruction pointer to back to the real instruction
 
     // This will return the breakpoint, with the original instruction as the instruction
     BREAKPOINT *brkpoint = get_original_breakpoint(regs.rip);
@@ -243,7 +417,6 @@ int serve_breakpoint(int pid)
     if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
 
-    // regs.rip = addr;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         DIE("(setregs) %s", strerror(errno));
 
@@ -265,7 +438,7 @@ void show_console()
     // fflush(stdout); // Flush the output to ensure it's displayed immediately
 }
 
-void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv)
+void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pid_t *child_pid)
 {
     // Prepend current directory path if necessary (so I can run with ./mdb test :p)
     char *program = prepend_current_directory(argv[1]);
@@ -284,6 +457,7 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv)
            waitpid_for_execvp.
          */
 
+        *child_pid = getpid();
         execvp(program, argv + 1);
         DIE("%s", strerror(errno));
     }
@@ -345,7 +519,47 @@ bool command_is_empty(char *command)
 
 bool arg_is_symbol(char *arg)
 {
-    return true;
+    // Check each character of the argument
+    while (*arg != '\0')
+    {
+        if (*arg == '*')
+            return false;
+        // If any character is not alphanumeric, return false
+        if (!isalnum(*arg))
+        {
+            return false;
+        }
+        arg++; // Move to the next character
+    }
+    return true; // If all characters are alphanumeric, return true
+}
+
+// Function to assign the address based on the input argument
+long assign_address(char *arg, Elf *elf, Elf_Scn *symtab)
+{
+    long address = 0;
+    if (arg_is_symbol(arg))
+    {
+        // If the argument is a symbol, get its address
+        address = getSymbolAddress(arg, elf, symtab);
+    }
+    else
+    {
+        if (strncmp(arg, "*0x", 3) == 0)
+        {
+            // Extract the hexadecimal number part after "*0x"
+            const char *hex_str = arg + 3;
+            // Convert the hexadecimal string to a long integer
+            char *endptr;
+            long address = strtol(hex_str, &endptr, 16);
+            // Check if conversion was successful
+            if (endptr != hex_str)
+            {
+                return address;
+            }
+        }
+    }
+    return address;
 }
 
 int run_gdb(char **argv)
@@ -353,7 +567,7 @@ int run_gdb(char **argv)
     char command[MAX_COMMAND_LENGTH];
     Elf *elf = NULL;
     Elf_Scn *symtab = NULL;
-    pid_t pid;
+    pid_t pid, child_pid;
     bool process_is_running = false;
     bool process_started = false;
 
@@ -388,30 +602,9 @@ int run_gdb(char **argv)
         {
             printf("This is a help message.\n");
         }
-        else if (strcmp(command, "si") == 0)
-        {
-            step_instruction(pid);
-        }
-        else if (strcmp(command, "disas") == 0)
-        {
-            disas(pid);
-        }
-        else if (strncmp(command, "c", strlen("c")) == 0)
-        {
-            if (process_started)
-            {
-                if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-                    DIE("(cont) %s", strerror(errno));
-                process_is_running = true;
-            }
-            else
-            {
-                printf("Process is not running.\n");
-            }
-        }
-        // Run the child program
         else if (strncmp(command, "r", strlen("r")) == 0)
         {
+            // Run the child program
             if (process_started)
             {
                 printf("Process is already running\n");
@@ -419,7 +612,7 @@ int run_gdb(char **argv)
             }
             process_is_running = true;
             process_started = true;
-            run_tracee_program(&pid, &elf, &symtab, argv);
+            run_tracee_program(&pid, &elf, &symtab, argv, &child_pid);
             printf("Starting program: %s\n\n", argv[1]);
             // for (int i = 0; i < breakpoints_count; i++)
             //     set_breakpoint(pid, breakpoints[i].address);
@@ -435,22 +628,13 @@ int run_gdb(char **argv)
                 printf("Invalid command format for breakpoint\n");
                 continue;
             }
-            char *symbol;
-            long address;
-            if (arg_is_symbol(arg))
-            {
-                symbol = arg;
-                address = getSymbolAddress(symbol, elf, symtab);
-            }
-            else
-            {
-                address = 10;
-            }
+
+            long address = assign_address(arg, elf, symtab);
 
             if (!address)
             {
                 // TODO Add here a question whether to bind later
-                fprintf(stderr, "The symbol %s has not been found.\n", symbol);
+                fprintf(stderr, "The symbol has not been found.\n");
                 continue;
             }
             else
@@ -467,7 +651,12 @@ int run_gdb(char **argv)
         }
         else if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0 || strcmp(command, "q") == 0)
         {
-            printf("Exiting...\n");
+            if (process_started)
+            {
+                printf("A debugging session is active.\n\n\tInferior 1 [process %d] will be killed.\n\nQuit anyway? (y or n) ", child_pid);
+            }
+            else
+                printf("Exiting...\n");
             DIE("Exited");
         }
         // Handle empty command (just Enter)
@@ -475,9 +664,37 @@ int run_gdb(char **argv)
         {
             // Do nothing and continue to prompt
         }
+
+        // The process MUST have been started to execute these commands
+        else if (process_started)
+        {
+            if (strcmp(command, "si") == 0)
+            {
+                step_instruction(pid);
+            }
+            else if (strcmp(command, "disas") == 0)
+            {
+                disas(pid, elf);
+            }
+            else if (strncmp(command, "c", strlen("c")) == 0)
+            {
+                continue_process(pid);
+                // if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+                //     DIE("(cont) %s", strerror(errno));
+                process_is_running = true;
+            }
+            else
+            {
+                printf("Unknown command: %s\n", command);
+            }
+        }
         else
         {
-            printf("Unknown command: %s\n", command);
+            // If the command is a valid command but the process hasn't started, prompt it
+            if (!(strcmp(command, "si") && strcmp(command, "disas") && strcmp(command, "c")))
+                printf("Process is not running.\n");
+            else
+                printf("Unknown command: %s\n", command);
         }
 
         // If there is a breakpoint, check whether we entered it
