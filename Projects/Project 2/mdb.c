@@ -25,6 +25,7 @@
 #define NOT_EXIT 0
 #define DISAS_INS_COUNT 10
 #define MAX_INS_FROM_FUNC_START 0 // All instructions in a function
+#define SIGKILL 9
 
 typedef struct breakpoint
 {
@@ -467,6 +468,15 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
     // Prepend current directory path if necessary (so I can run with ./mdb test :p)
     char *program = prepend_current_directory(argv[1]);
     /* fork() for executing the program that is analyzed.  */
+
+    int pipe_fd[2];         // Pipe file descriptors
+    char child_pid_str[16]; // Buffer to store child PID as string
+
+    if (pipe(pipe_fd) == -1)
+    {
+        DIE("Pipe failed: %s", strerror(errno));
+    }
+
     *pid = fork();
     switch (*pid)
     {
@@ -481,10 +491,32 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
            waitpid_for_execvp.
          */
 
-        *child_pid = getpid();
+        pid_t child_pid_in_child = getpid();
+        // Convert child PID to string
+        snprintf(child_pid_str, sizeof(child_pid_str), "%d", child_pid_in_child);
+
+        // Write child PID to the pipe, so the parent can see it
+        if (write(pipe_fd[1], child_pid_str, strlen(child_pid_str) + 1) == -1)
+        {
+            DIE("Write to pipe failed: %s", strerror(errno));
+        }
+
         execvp(program, argv + 1);
         DIE("%s", strerror(errno));
     }
+    // Parent process
+    // Close write end of the pipe
+    close(pipe_fd[1]);
+
+    // Read child PID from the pipe
+    ssize_t num_bytes = read(pipe_fd[0], child_pid_str, sizeof(child_pid_str));
+    if (num_bytes == -1)
+    {
+        DIE("Read from pipe failed: %s", strerror(errno));
+    }
+
+    // Now we can save the child pid
+    *child_pid = atoi(child_pid_str);
 
     ptrace(PTRACE_SETOPTIONS, *pid, 0, PTRACE_O_EXITKILL);
 
@@ -649,6 +681,13 @@ void list_breakpoints()
     printf("\n");
 }
 
+void clearInputBuffer()
+{
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF)
+        ;
+}
+
 int run_gdb(char **argv)
 {
     char command[MAX_COMMAND_LENGTH], prev_command[MAX_COMMAND_LENGTH];
@@ -679,6 +718,7 @@ int run_gdb(char **argv)
     {
         // Show the console prompt again
         show_console();
+
         if (fgets(command, sizeof(command), stdin) == NULL)
             break;
         // Remove trailing newline character
@@ -752,16 +792,47 @@ int run_gdb(char **argv)
             if (process_started)
             {
                 printf("A debugging session is active.\n\n\tInferior 1 [process %d] will be killed.\n\nQuit anyway? (y or n) ", child_pid);
+                fflush(stdout); // Ensure prompt is displayed immediately
+
+                char response[2];
+                // Read user input
+                if (fgets(response, sizeof(response), stdin) != NULL)
+                {
+                    if (response[0] == 'y' || response[0] == 'Y')
+                    {
+                        // Kill the child process
+                        if (kill(child_pid, SIGKILL) == -1)
+                        {
+                            DIE("Failed to kill child process: %s", strerror(errno));
+                        }
+                        // Wait for the child process to terminate
+                        waitpid(child_pid, NULL, 0);
+                        printf("Child process %d killed.\n", child_pid);
+                        DIE("Exited");
+                    }
+                    else
+                    {
+                        printf("\n");
+                    }
+                }
+                else
+                {
+                    // Error or EOF while reading input
+                    printf("Error reading input.\n");
+                }
+                // Clear input buffer
+                clearInputBuffer();
             }
             else
+            {
                 printf("Exiting...\n");
-            DIE("Exited");
+            }
         }
         else if (strcmp(command, "l") == 0)
         {
             list_breakpoints();
         }
-        else if (strncmp(command, "d", strlen("d")) == 0)
+        else if (strcmp(command, "disas") != 0 && strncmp(command, "d", strlen("d")) == 0)
         {
             if (!breakpoints)
             {
