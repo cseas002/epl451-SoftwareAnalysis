@@ -385,8 +385,9 @@ void continue_process(pid_t pid)
         DIE("(cont) %s", strerror(errno));
 }
 
-void step_instruction(pid_t pid)
+void step_instruction(Elf *elf, pid_t pid)
 {
+    // TODO Check whether the instruction has a breakpoint
     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
         DIE("(singlestep) %s", strerror(errno));
 
@@ -397,7 +398,13 @@ void step_instruction(pid_t pid)
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         DIE("(getregs) %s", strerror(errno));
 
-    printf("RIP: %llx\n", regs.rip);
+    char *function_name = "?";
+
+    find_address_function(elf, regs.rip, &function_name);
+    if (!function_name)
+        function_name = "?";
+
+    printf("\033[0;34m0x%llx\033[0m in \033[0;33m%s\033[0m ()\n", regs.rip, function_name);
     // waitpid(pid, 0, 0);
 }
 
@@ -513,6 +520,52 @@ void add_breakpoint(long address, long original_instruction)
     // breakpoints[breakpoints_count - 1].ignore = ignore;
 }
 
+bool remove_breakpoint(int breakpoint_no)
+{
+    // Find the index of the breakpoint to remove
+    int remove_index = -1;
+    for (int i = 0; i < breakpoints_count; i++)
+    {
+        if (breakpoints[i].number == breakpoint_no)
+        {
+            remove_index = i;
+            break;
+        }
+    }
+
+    // If the breakpoint was not found, return false
+    if (remove_index == -1)
+    {
+        return false;
+    }
+
+    // Shift the elements after the removed breakpoint
+    for (int i = remove_index; i < breakpoints_count - 1; i++)
+    {
+        breakpoints[i] = breakpoints[i + 1];
+    }
+
+    // Decrement the count of breakpoints
+    breakpoints_count--;
+
+    if (breakpoints_count == 0)
+    {
+        free(breakpoints);
+        breakpoints = NULL;
+        return true;
+    }
+    // Reallocate memory to reduce the size of the array
+    breakpoints = (BREAKPOINT *)realloc(breakpoints, sizeof(BREAKPOINT) * breakpoints_count);
+    if (breakpoints == NULL)
+    {
+        // Handle memory allocation failure
+        fprintf(stderr, "Error: Memory reallocation failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return true; // Breakpoint removed successfully
+}
+
 // Function to free the memory allocated for the array
 void cleanup_breakpoints()
 {
@@ -579,9 +632,26 @@ long assign_address(char *arg, Elf *elf, Elf_Scn *symtab)
     return address;
 }
 
+void list_breakpoints()
+{
+    if (!breakpoints)
+    {
+        printf("\nNo breakpoints are set\n\n");
+        return;
+    }
+
+    printf("List of current breakpoints:\n");
+    for (int i = 0; i < breakpoints_count; i++)
+    {
+        printf("Breakpoint %d at \033[0;34m0x%lx\033[0m\n", breakpoints[i].number, breakpoints[i].address);
+    }
+
+    printf("\n");
+}
+
 int run_gdb(char **argv)
 {
-    char command[MAX_COMMAND_LENGTH];
+    char command[MAX_COMMAND_LENGTH], prev_command[MAX_COMMAND_LENGTH];
     Elf *elf = NULL;
     Elf_Scn *symtab = NULL;
     pid_t pid, child_pid;
@@ -615,7 +685,18 @@ int run_gdb(char **argv)
         command[strcspn(command, "\n")] = '\0';
 
         // Handle commands here
-        if (strcmp(command, "help") == 0)
+        // Handle empty command (just Enter)
+        if (command_is_empty(command))
+        {
+            // Execute the previous command
+            strcpy(command, prev_command);
+        }
+        // Handle empty command (just Enter)
+        if (command_is_empty(command))
+        {
+            // Do nothing (this will happen if the user presses enter the first time)
+        }
+        else if (strcmp(command, "help") == 0)
         {
             printf("This is a help message.\n");
         }
@@ -636,7 +717,7 @@ int run_gdb(char **argv)
         }
         else if (strncmp(command, "b", strlen("b")) == 0)
         {
-            char arg[MAX_COMMAND_LENGTH];                // Assuming the maximum length of the symbol name
+            char arg[MAX_COMMAND_LENGTH - 1];            // Assuming the maximum length of the symbol name
             int parsed = sscanf(command, "%*s %s", arg); // Skip the first string "b" and parse the symbol name
 
             if (parsed != 1)
@@ -676,10 +757,31 @@ int run_gdb(char **argv)
                 printf("Exiting...\n");
             DIE("Exited");
         }
-        // Handle empty command (just Enter)
-        else if (command_is_empty(command))
+        else if (strcmp(command, "l") == 0)
         {
-            // Do nothing and continue to prompt
+            list_breakpoints();
+        }
+        else if (strncmp(command, "d", strlen("d")) == 0)
+        {
+            if (!breakpoints)
+            {
+                printf("There are no breakpoints\n\n");
+                continue;
+            }
+            char arg[MAX_COMMAND_LENGTH - 1];            // Assuming the maximum length of the symbol name
+            int parsed = sscanf(command, "%*s %s", arg); // Skip the first string "d" and parse the symbol name
+
+            int breakpoint_no = atoi(arg);
+
+            if (parsed != 1 || (breakpoint_no == 0 && strcmp(arg, "0") != 0))
+            {
+                // atoi failed to convert the string to an integer
+                printf("Invalid input: %s\n", arg);
+            }
+            else if (!remove_breakpoint(breakpoint_no))
+            {
+                printf("Breakpoint %d not found\n", breakpoint_no);
+            }
         }
 
         // The process MUST have been started to execute these commands
@@ -687,13 +789,13 @@ int run_gdb(char **argv)
         {
             if (strcmp(command, "si") == 0)
             {
-                step_instruction(pid);
+                step_instruction(elf, pid);
             }
             else if (strcmp(command, "disas") == 0)
             {
                 disas(pid, elf);
             }
-            else if (strncmp(command, "c", strlen("c")) == 0)
+            else if (strcmp(command, "c") == 0)
             {
                 continue_process(pid);
                 // if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
@@ -708,11 +810,14 @@ int run_gdb(char **argv)
         else
         {
             // If the command is a valid command but the process hasn't started, prompt it
-            if (!(strcmp(command, "si") && strcmp(command, "disas") && strcmp(command, "c")))
+            if (!(strcmp(command, "si") && strcmp(command, "disas") && strcmp(command, "c") && strcmp(command, "ni")))
                 printf("Process is not running.\n");
             else
                 printf("Unknown command: %s\n", command);
         }
+
+        // Save the previous command
+        strcpy(prev_command, command);
 
         // If there is a breakpoint, check whether we entered it
         if (process_is_running && breakpoints_count != 0)
