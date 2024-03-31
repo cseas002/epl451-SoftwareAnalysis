@@ -21,11 +21,11 @@
 
 #define TOOL "min_gdb"
 #define MAX_COMMAND_LENGTH 100
-#define EXIT 1
-#define NOT_EXIT 0
 #define DISAS_INS_COUNT 10
 #define MAX_INS_FROM_FUNC_START 0 // All instructions in a function
-#define SIGKILL 9
+#define SIGTRAP 5
+#define FOUND 1
+#define NOT_FOUND 0
 
 typedef struct breakpoint
 {
@@ -194,7 +194,73 @@ bool ret_ins(cs_insn insn)
     }
 }
 
-void disassemble(const uint8_t *code, size_t size, long current_address, int ins_count, Elf *elf, char *function_name, Elf64_Sym *function_start)
+BREAKPOINT get_breakpoint(long address)
+{
+    BREAKPOINT failure = {0, 0, 0};
+
+    for (int i = 0; i < breakpoints_count; i++)
+    {
+        if (address == breakpoints[i].address)
+        {
+            return breakpoints[i];
+        }
+    }
+    return failure;
+}
+
+// This function will replace the int3 added by breakpoints to their original instructions
+int find_and_change_int3(uint8_t *code, int offset, long address)
+{
+    BREAKPOINT breakpoint = get_breakpoint(address);
+    if (breakpoint.number == 0)
+    { // Failure
+        return NOT_FOUND;
+    }
+
+    code[offset] = (breakpoint.instruction & 0xFF); // Get the last byte
+    return FOUND;
+}
+
+void remove_int3(uint8_t *code, size_t size, long start_address, int ins_count)
+{
+    csh handle;
+    cs_insn *insn;
+
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
+    {
+        fprintf(stderr, "Error: Failed to initialize Capstone\n");
+        return;
+    }
+    cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
+
+    bool valid;
+    do
+    {
+        valid = true;
+        size_t count = cs_disasm(handle, code, size, start_address, ins_count, &insn);
+        if (count > 0)
+        {
+            // Get the instructions one by one
+            for (size_t j = 0; j < count; j++)
+            {
+                // If you found an int3, replace it with the original instruction
+                if (strcmp(insn[j].mnemonic, "int3") == 0)
+                {
+                    int offset = insn[j].address - start_address;
+                    if (find_and_change_int3(code, offset, insn[j].address) == FOUND)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            cs_free(insn, count);
+        }
+    } while (!valid);
+    cs_close(&handle);
+}
+
+void disassemble(uint8_t *code, size_t size, long current_address, int ins_count, char *function_name, Elf64_Sym *function_start)
 {
     long function_start_address = current_address;
 
@@ -202,10 +268,13 @@ void disassemble(const uint8_t *code, size_t size, long current_address, int ins
     {
         printf("Dump of assembler code for function \033[0;33m%s\033[0m:\n", function_name);
         function_start_address = function_start->st_value;
+
+        // If there are breakpoints in the code, remove them
+        remove_int3(code, size, function_start_address, ins_count);
     }
 
     csh handle;
-    cs_insn *insn, *insn_to_be_printed;
+    cs_insn *insn;
 
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK)
     {
@@ -220,53 +289,49 @@ void disassemble(const uint8_t *code, size_t size, long current_address, int ins
 
     // Disassemble the instructions starting from the function start,
     // and print 4 instructions prior the the start address, the start address instruction, and 5 after
-
     size_t count = cs_disasm(handle, code, size, function_start_address, ins_count, &insn);
-    size_t count2 = 0;
     bool found_address = false;
+    int start_from = 0;
+
     // insn_to_be_printed = malloc(DISAS_INS_COUNT * sizeof(cs_insn));
     if (count > 0)
     {
         // Get the instructions one by one
         for (size_t j = 0; j < count; j++)
         {
-            printf("address: %lx\n", insn[j].address);
             // If the start address is found
             if (insn[j].address == current_address)
             {
-                int start_from;
                 // Copy the 4 prior elements, and the current one
-                if (j < 4)
-                {
-                    start_from = 0;
-                }
-                else
+                if (j > 4)
                 {
                     start_from = j - 4;
                 }
-
-                count2 = cs_disasm(handle, code, size, insn[start_from].address, DISAS_INS_COUNT, &insn_to_be_printed);
                 found_address = true;
                 break;
             }
         }
         if (found_address)
         {
-            for (int i = 0; i < count2; i++)
+            for (int i = start_from; i < start_from + 10; i++)
             {
-                if (insn_to_be_printed[i].address == current_address)
+                if (insn[i].address == current_address)
                     printf("=> ");
                 else
                     printf("   ");
 
-                printf("\033[0;34m0x%lx:\033[0m ", insn_to_be_printed[i].address);
-                printf("\033[0m<+%ld>:\t", insn_to_be_printed[i].address - function_start_address);
-                printf("\033[0;32m%s\t\033[0;31m%s\033[0m\n", insn_to_be_printed[i].mnemonic, insn_to_be_printed[i].op_str);
+                printf("\033[0;34m0x%lx:\033[0m ", insn[i].address);
+                printf("\033[0m<+%ld>:\t", insn[i].address - function_start_address);
+                printf("\033[0;32m%s\t\033[0;31m%s\033[0m\n", insn[i].mnemonic, insn[i].op_str);
                 // If you found a return instruction, then stop
-                if (ret_ins(insn_to_be_printed[i]))
+                if (ret_ins(insn[i]))
                     break;
             }
-            cs_free(insn_to_be_printed, count2);
+            // cs_free(insn_to_be_printed, count2);
+        }
+        else
+        {
+            printf("Function start: %lx\n", function_start_address);
         }
     }
     else
@@ -315,7 +380,7 @@ void process_inspect(int pid, struct user_regs_struct regs, Elf *elf)
     }
 
     // Disassemble the read data
-    disassemble(binary_data, total_size, current_address, MAX_INS_FROM_FUNC_START, elf, function_name, function_start);
+    disassemble(binary_data, total_size, current_address, MAX_INS_FROM_FUNC_START, function_name, function_start);
     // Clean up
     free(binary_data);
 }
@@ -422,7 +487,60 @@ BREAKPOINT *get_original_breakpoint(long address)
     return NULL;
 }
 
-int serve_breakpoint(Elf *elf, int pid)
+// Comparison function for qsort
+int compare_breakpoints(const void *a, const void *b)
+{
+    const BREAKPOINT *bp1 = (const BREAKPOINT *)a;
+    const BREAKPOINT *bp2 = (const BREAKPOINT *)b;
+    // Compare addresses
+    if (bp1->address < bp2->address)
+        return -1;
+    if (bp1->address > bp2->address)
+        return 1;
+    return 0;
+}
+
+// Function to sort breakpoints array
+void sort_breakpoints()
+{
+    qsort(breakpoints, breakpoints_count, sizeof(BREAKPOINT), compare_breakpoints);
+}
+
+long find_correct_instruction(long address)
+{
+    // Firstly, sort the breakpoints array based on their address
+    sort_breakpoints();
+    long correct_instruction;
+
+    for (int i = 0; i < breakpoints_count; i++)
+    {
+        // Find the correct instruction
+        if (breakpoints[i].address == address)
+        {
+            BREAKPOINT breakpoint = breakpoints[i];
+            correct_instruction = breakpoint.instruction;
+            for (int j = i + 1; j < i + 8 && j < breakpoints_count; j++)
+            {
+                int offset = j - i;
+                BREAKPOINT next_byte_possible_breakpoint = get_breakpoint(breakpoint.address);
+                // If there is such a breakpoint
+                if (next_byte_possible_breakpoint.number != 0)
+                {
+                    // This is the offset position
+                    long cc_offset = (0xCC << (offset * 8)) | (0x00 << (offset * 2));
+                    printf("CC OFFSET: %lx\n", cc_offset);
+                    // correct_instruction = (correct_instruction 0xF)
+                }
+            }
+
+            break;
+        }
+    }
+
+    return correct_instruction;
+}
+
+void serve_breakpoint(Elf *elf, int pid)
 {
     struct user_regs_struct regs;
     // Now, register rip (instruction pointer) has the address of the breakpoint
@@ -439,13 +557,14 @@ int serve_breakpoint(Elf *elf, int pid)
 
     printf("Breakpoint %d, \033[0;34m0x%lx\033[0m in \033[0;33m%s\033[0m ()\n", brkpoint->number, brkpoint->address, function_name);
 
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)brkpoint->instruction) == -1)
+    // There might be a problem here: If two breakpoints are near, it will remove the int3
+    // So we need to check that
+    long correct_instruction = find_correct_instruction(brkpoint->address);
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)correct_instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
 
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         DIE("(setregs) %s", strerror(errno));
-
-    return NOT_EXIT;
 }
 
 void show_initial_console_messaage()
@@ -533,6 +652,15 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
 // Function to add a new instruction to the array
 void add_breakpoint(long address, long original_instruction)
 {
+    if (breakpoints)
+    {
+        for (int i = 0; i < breakpoints_count; i++)
+            if (address == breakpoints[i].address)
+            {
+                printf("Breakpoint already exists. Skipping\n");
+                return;
+            }
+    }
     // Increment the count of instructions
     breakpoints_count++;
 
@@ -751,7 +879,7 @@ int run_gdb(char **argv)
             process_is_running = true;
             process_started = true;
             run_tracee_program(&pid, &elf, &symtab, argv, &child_pid);
-            printf("Starting program: %s\n\n", argv[1]);
+            printf("Starting program: \033[0;33m%s\033[0m\n\n", argv[1]);
             // for (int i = 0; i < breakpoints_count; i++)
             //     set_breakpoint(pid, breakpoints[i].address);
         }
@@ -772,7 +900,7 @@ int run_gdb(char **argv)
             if (!address)
             {
                 // TODO Add here a question whether to bind later
-                fprintf(stderr, "The symbol has not been found.\n");
+                fprintf(stderr, "The symbol or address has not been found.\n");
                 continue;
             }
             else
@@ -800,8 +928,8 @@ int run_gdb(char **argv)
                 {
                     if (response[0] == 'y' || response[0] == 'Y')
                     {
-                        // Kill the child process
-                        if (kill(child_pid, SIGKILL) == -1)
+                        // Kill the child process using ptrace
+                        if (ptrace(PTRACE_KILL, child_pid, NULL, NULL) == -1)
                         {
                             DIE("Failed to kill child process: %s", strerror(errno));
                         }
@@ -825,7 +953,7 @@ int run_gdb(char **argv)
             }
             else
             {
-                printf("Exiting...\n");
+                DIE("Exited");
             }
         }
         else if (strcmp(command, "l") == 0)
@@ -887,21 +1015,39 @@ int run_gdb(char **argv)
                 printf("Unknown command: %s\n", command);
         }
 
-        // Save the previous command
-        strcpy(prev_command, command);
+        // Save the previous command, if it's si or c
+        if (strcmp(command, "c") == 0 || strcmp(command, "si") == 0)
+            strcpy(prev_command, command);
 
         // If there is a breakpoint, check whether we entered it
-        if (process_is_running && breakpoints_count != 0)
+        if (process_is_running)
         {
-            // Check whether the program entered a breakpoint
-            waitpid(pid, 0, 0);
+            int status;
+            // Wait for the child process to change state
+            waitpid(pid, &status, 0);
 
-            /* We are in the breakpoint.  */
-            if (serve_breakpoint(elf, pid) == EXIT)
+            if (WIFEXITED(status)) // Check if the child process exited normally
             {
-                printf("EXITED\n");
+                printf("Child process %d exited with status %d.\n", pid, WEXITSTATUS(status));
+                process_is_running = false;
+                process_started = false;
             }
-            process_is_running = false;
+            else if (WIFSTOPPED(status)) // Check if the child process stopped
+            {
+                if (WSTOPSIG(status) == SIGTRAP) // Check if the stop signal is due to a breakpoint
+                {
+                    if (breakpoints_count != 0)
+                    {
+                        serve_breakpoint(elf, pid);
+                        process_is_running = false;
+                    }
+                }
+                else
+                {
+                    // Handle other stop signals
+                    printf("HEREEEE\n");
+                }
+            }
         }
     }
     return 0;

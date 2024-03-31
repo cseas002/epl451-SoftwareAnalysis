@@ -1,12 +1,16 @@
 #include <stdio.h>
 
-void foo(void) {
-    fprintf(stderr, "Hello World.\n");
+int foo(int arg)
+{
+    if (arg == 1)
+        return 0;
+    return foo(arg - 1);
 }
 
-int main(int argc, char *argv[]) { 
+int main(int argc, char *argv[])
+{
 
-    foo();
-
+    foo(2);
+    fprintf(stderr, "Hello World.\n");
     return 1;
 }
