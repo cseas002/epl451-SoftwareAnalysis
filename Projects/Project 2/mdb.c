@@ -519,17 +519,37 @@ long find_correct_instruction(long address)
         {
             BREAKPOINT breakpoint = breakpoints[i];
             correct_instruction = breakpoint.instruction;
-            for (int j = i + 1; j < i + 8 && j < breakpoints_count; j++)
+            for (int offset = 1; offset < 8; offset++)
             {
-                int offset = j - i;
-                BREAKPOINT next_byte_possible_breakpoint = get_breakpoint(breakpoint.address);
+                BREAKPOINT next_byte_possible_breakpoint = get_breakpoint(breakpoint.address + offset);
                 // If there is such a breakpoint
                 if (next_byte_possible_breakpoint.number != 0)
                 {
-                    // This is the offset position
-                    long cc_offset = (0xCC << (offset * 8)) | (0x00 << (offset * 2));
-                    printf("CC OFFSET: %lx\n", cc_offset);
-                    // correct_instruction = (correct_instruction 0xF)
+                    // Add its int3
+                    switch (offset)
+                    {
+                    case 1:
+                        correct_instruction = (correct_instruction & 0xFFFFFFFFFFFF00FF) | 0xCC00;
+                        break;
+                    case 2:
+                        correct_instruction = (correct_instruction & 0xFFFFFFFFFF00FFFF) | 0xCC0000;
+                        break;
+                    case 3:
+                        correct_instruction = (correct_instruction & 0xFFFFFFFF00FFFFFF) | 0xCC000000;
+                        break;
+                    case 4:
+                        correct_instruction = (correct_instruction & 0xFFFFFF00FFFFFFFF) | 0xCC00000000;
+                        break;
+                    case 5:
+                        correct_instruction = (correct_instruction & 0xFFFF00FFFFFFFFFF) | 0xCC0000000000;
+                        break;
+                    case 6:
+                        correct_instruction = (correct_instruction & 0xFF00FFFFFFFFFFFF) | 0xCC000000000000;
+                        break;
+                    case 7:
+                        correct_instruction = (correct_instruction & 0x00FFFFFFFFFFFFFF) | 0xCC00000000000000;
+                        break;
+                    }
                 }
             }
 
