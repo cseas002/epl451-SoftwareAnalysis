@@ -16,6 +16,9 @@
 #include <syscall.h>
 #include <sys/ptrace.h>
 
+// #include <termios.h>
+// #include <conio.h>
+
 /* Elf*/
 #include "elf_mdb_helpers.h"
 
@@ -404,6 +407,8 @@ long set_breakpoint(int pid, long addr)
     if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
         DIE("(pokedata) %s", strerror(errno));
 
+    // printf("POKED Data on address %lx\n", addr);
+
     /* Resume process.  */
     // if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
     //     DIE("(cont) %s", strerror(errno));
@@ -444,22 +449,33 @@ void continue_process(pid_t pid)
 
     waitpid(pid, 0, 0);
 
-    // Set the breakpoint back
-    set_breakpoint(pid, regs.rip);
+    BREAKPOINT prev_breakpoint = get_breakpoint(regs.rip);
+
+    if (prev_breakpoint.number != 0)
+    {
+        // printf("Setting back breakpoint\n");
+        // Set the breakpoint back
+        set_breakpoint(pid, regs.rip);
+    }
 
     if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-        DIE("(cont) %s", strerror(errno));
+        DIE("(cont) set_back_breakpoint %s", strerror(errno));
 }
 
-void step_instruction(Elf *elf, pid_t pid)
+bool step_instruction(Elf *elf, pid_t pid)
 {
-    // TODO Check whether the instruction has a breakpoint
+    struct user_regs_struct regs;
+    // Get previous
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        DIE("(getregs) %s", strerror(errno));
+
+    long old_rip = regs.rip;
+
     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
         DIE("(singlestep) %s", strerror(errno));
 
     waitpid(pid, 0, 0);
 
-    struct user_regs_struct regs;
     // Get registers
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         DIE("(getregs) %s", strerror(errno));
@@ -471,6 +487,31 @@ void step_instruction(Elf *elf, pid_t pid)
         function_name = "?";
 
     printf("\033[0;34m0x%llx\033[0m in \033[0;33m%s\033[0m ()\n", regs.rip, function_name);
+
+    // Set back the breakpoint
+    BREAKPOINT prev_breakpoint = get_breakpoint(old_rip);
+
+    if (prev_breakpoint.number != 0)
+    {
+        // printf("Setting back\n");
+        set_breakpoint(pid, old_rip);
+    }
+
+    // If this instruction is a breakpoint, then we need to continue so it will stop here
+    BREAKPOINT breakpoint = get_breakpoint(regs.rip);
+
+    // If such a breakpoint exist, then continue
+    if (breakpoint.number != 0)
+    {
+        printf("Entered breakpoint!\n");
+        // // Continue the execution
+        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+            DIE("(cont) run tracee %s", strerror(errno));
+
+        return true;
+    }
+
+    return false;
     // waitpid(pid, 0, 0);
 }
 
@@ -508,15 +549,16 @@ void sort_breakpoints()
 
 long find_correct_instruction(long address)
 {
-    // Firstly, sort the breakpoints array based on their address
-    sort_breakpoints();
     long correct_instruction;
+
+    bool found = false;
 
     for (int i = 0; i < breakpoints_count; i++)
     {
         // Find the correct instruction
         if (breakpoints[i].address == address)
         {
+            found = true;
             BREAKPOINT breakpoint = breakpoints[i];
             correct_instruction = breakpoint.instruction;
             for (int offset = 1; offset < 8; offset++)
@@ -525,6 +567,7 @@ long find_correct_instruction(long address)
                 // If there is such a breakpoint
                 if (next_byte_possible_breakpoint.number != 0)
                 {
+                    // printf("Adding back CC in %lx\n", next_byte_possible_breakpoint.address);
                     // Add its int3
                     switch (offset)
                     {
@@ -557,6 +600,9 @@ long find_correct_instruction(long address)
         }
     }
 
+    if (!found)
+        printf("Something is really wrong\n");
+
     return correct_instruction;
 }
 
@@ -579,7 +625,9 @@ void serve_breakpoint(Elf *elf, int pid)
 
     // There might be a problem here: If two breakpoints are near, it will remove the int3
     // So we need to check that
-    long correct_instruction = find_correct_instruction(brkpoint->address);
+    long correct_instruction = find_correct_instruction(brkpoint->address); // brkpoint->instruction; // find_correct_instruction(brkpoint->address);
+
+    // printf("INS: %lx\n", correct_instruction);
     if (ptrace(PTRACE_POKEDATA, pid, (void *)brkpoint->address, (void *)correct_instruction) == -1)
         DIE("(pokedata) %s", strerror(errno));
 
@@ -590,9 +638,8 @@ void serve_breakpoint(Elf *elf, int pid)
 void show_initial_console_messaage()
 {
     printf("For help, type \"help\".\n");
-    printf("Type \"apropos word\" to search for commands related to \"word\"...\n");
+    // printf("Type \"apropos word\" to search for commands related to \"word\"...\n");
     printf("Reading symbols from test...\n");
-    printf("(No debugging symbols found in test)\n");
     // fflush(stdout);
 }
 
@@ -662,7 +709,10 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
     waitpid(*pid, 0, 0);
 
     for (int i = 0; i < breakpoints_count; i++)
+    {
         set_breakpoint(*pid, breakpoints[i].address);
+        // printf("Breakpoint %lx set \n", breakpoints[i].address);
+    }
 
     // Continue the execution
     if (ptrace(PTRACE_CONT, *pid, 0, 0) == -1)
@@ -697,7 +747,9 @@ void add_breakpoint(long address, long original_instruction)
     breakpoints[breakpoints_count - 1].address = address;
     breakpoints[breakpoints_count - 1].instruction = original_instruction;
     breakpoints[breakpoints_count - 1].number = next_breakpoint_number++;
-    // breakpoints[breakpoints_count - 1].ignore = ignore;
+
+    // Sort the breakpoints array based on their address
+    sort_breakpoints();
 }
 
 bool remove_breakpoint(int breakpoint_no)
@@ -923,17 +975,17 @@ int run_gdb(char **argv)
                 fprintf(stderr, "The symbol or address has not been found.\n");
                 continue;
             }
-            else
-            {
-                printf("Breakpoint %d at \033[0;34m0x%lx\033[0m\n", next_breakpoint_number, address);
-                // fflush(stdout); // Flush stdout to ensure the message is displayed immediately
-            }
+
+            // fflush(stdout); // Flush stdout to ensure the message is displayed immediately
+
             long instruction = 0;
             if (process_started)
             {
                 instruction = set_breakpoint(pid, address);
             }
             add_breakpoint(address, instruction); // If instruction == 0, it will add the instructions later. Maybe not the best implementation
+
+            printf("Breakpoint %d at \033[0;34m0x%lx\033[0m\n", next_breakpoint_number - 1, address);
         }
         else if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0 || strcmp(command, "q") == 0)
         {
@@ -1008,7 +1060,7 @@ int run_gdb(char **argv)
         {
             if (strcmp(command, "si") == 0)
             {
-                step_instruction(elf, pid);
+                process_is_running = step_instruction(elf, pid);
             }
             else if (strcmp(command, "disas") == 0)
             {
@@ -1035,8 +1087,8 @@ int run_gdb(char **argv)
                 printf("Unknown command: %s\n", command);
         }
 
-        // Save the previous command, if it's si or c
-        if (strcmp(command, "c") == 0 || strcmp(command, "si") == 0)
+        // Save the previous command, if it's si
+        if (strcmp(command, "si") == 0)
             strcpy(prev_command, command);
 
         // If there is a breakpoint, check whether we entered it
@@ -1048,7 +1100,8 @@ int run_gdb(char **argv)
 
             if (WIFEXITED(status)) // Check if the child process exited normally
             {
-                printf("Child process %d exited with status %d.\n", pid, WEXITSTATUS(status));
+
+                printf("[Inferior 1 (process %d) exited with code %d]\n", pid, WEXITSTATUS(status));
                 process_is_running = false;
                 process_started = false;
             }
@@ -1067,6 +1120,10 @@ int run_gdb(char **argv)
                     // Handle other stop signals
                     printf("HEREEEE\n");
                 }
+            }
+            else
+            {
+                printf("HERE2\n");
             }
         }
     }
