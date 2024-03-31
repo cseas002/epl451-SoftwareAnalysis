@@ -84,6 +84,51 @@ void disassemble_function(Elf *elf, Elf_Scn *scn, GElf_Shdr *shdr, FunctionInfo 
     cs_close(&handle);
 }
 
+bool arg_is_symbol(char *arg)
+{
+    // Check each character of the argument
+    while (*arg != '\0')
+    {
+        if (*arg == '*')
+            return false;
+        // If any character is not alphanumeric, return false
+        if (!isalnum(*arg))
+        {
+            return false;
+        }
+        arg++; // Move to the next character
+    }
+    return true; // If all characters are alphanumeric, return true
+}
+
+// Function to assign the address based on the input argument
+long assign_address(char *arg, Elf *elf, Elf_Scn *symtab)
+{
+    long address = 0;
+    if (arg_is_symbol(arg))
+    {
+        // If the argument is a symbol, get its address
+        address = getSymbolAddress(arg, elf, symtab);
+    }
+    else
+    {
+        if (strncmp(arg, "*0x", 3) == 0)
+        {
+            // Extract the hexadecimal number part after "*0x"
+            const char *hex_str = arg + 3;
+            // Convert the hexadecimal string to a long integer
+            char *endptr;
+            long address = strtol(hex_str, &endptr, 16);
+            // Check if conversion was successful
+            if (endptr != hex_str)
+            {
+                return address;
+            }
+        }
+    }
+    return address;
+}
+
 // Function to find the function containing the given address
 Elf64_Sym *find_address_function(Elf *elf, Elf64_Addr address, char **function_name)
 {
@@ -393,7 +438,6 @@ long set_breakpoint(int pid, long addr)
     /* Backup current code.  */
     long original_ins = 0;
 
-    // printf("(0x%lx in )\n", addr);
     original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (original_ins == -1)
     {
@@ -633,6 +677,8 @@ void serve_breakpoint(Elf *elf, int pid)
 
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         DIE("(setregs) %s", strerror(errno));
+
+    disas(pid, elf);
 }
 
 void show_initial_console_messaage()
@@ -817,51 +863,6 @@ bool command_is_empty(char *command)
         command++; // Move to the next character
     }
     return true; // All characters are whitespace, so the command is empty
-}
-
-bool arg_is_symbol(char *arg)
-{
-    // Check each character of the argument
-    while (*arg != '\0')
-    {
-        if (*arg == '*')
-            return false;
-        // If any character is not alphanumeric, return false
-        if (!isalnum(*arg))
-        {
-            return false;
-        }
-        arg++; // Move to the next character
-    }
-    return true; // If all characters are alphanumeric, return true
-}
-
-// Function to assign the address based on the input argument
-long assign_address(char *arg, Elf *elf, Elf_Scn *symtab)
-{
-    long address = 0;
-    if (arg_is_symbol(arg))
-    {
-        // If the argument is a symbol, get its address
-        address = getSymbolAddress(arg, elf, symtab);
-    }
-    else
-    {
-        if (strncmp(arg, "*0x", 3) == 0)
-        {
-            // Extract the hexadecimal number part after "*0x"
-            const char *hex_str = arg + 3;
-            // Convert the hexadecimal string to a long integer
-            char *endptr;
-            long address = strtol(hex_str, &endptr, 16);
-            // Check if conversion was successful
-            if (endptr != hex_str)
-            {
-                return address;
-            }
-        }
-    }
-    return address;
 }
 
 void list_breakpoints()
@@ -1052,6 +1053,10 @@ int run_gdb(char **argv)
             else if (!remove_breakpoint(breakpoint_no))
             {
                 printf("Breakpoint %d not found\n", breakpoint_no);
+            }
+            else
+            {
+                printf("Breakpoint %d removed.\n", breakpoint_no);
             }
         }
 
