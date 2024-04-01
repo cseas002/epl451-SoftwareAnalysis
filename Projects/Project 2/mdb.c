@@ -30,6 +30,8 @@
 #define FOUND 1
 #define NOT_FOUND 0
 
+#define MAX_LINE_LENGTH 256
+
 typedef struct breakpoint
 {
     long address;
@@ -37,17 +39,116 @@ typedef struct breakpoint
     unsigned int number;
 } BREAKPOINT;
 
-// This could be a C++ map
-BREAKPOINT *breakpoints = NULL;          // Global array of structs
-int breakpoints_count = 0;               // Number of elements currently in the array
-unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint number
-
 typedef struct
 {
     Elf64_Addr current_address;
     Elf64_Addr end_address;
     const char *name;
 } FunctionInfo;
+
+// This could be a C++ map
+BREAKPOINT *breakpoints = NULL;          // Global array of structs
+int breakpoints_count = 0;               // Number of elements currently in the array
+unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint number
+
+unsigned long exec_aslr_offset;
+unsigned long lib_aslr_offset;
+
+// Function to read and parse the memory map of the child process
+void read_memory_map(pid_t child_pid)
+{
+    char maps_path[256];
+    FILE *maps_file;
+    char line[MAX_LINE_LENGTH];
+
+    printf("Child pid: %d\n", child_pid);
+
+    // Construct the path to the memory map file of the child process
+    sprintf(maps_path, "/proc/%d/maps", child_pid);
+
+    // Open the memory map file
+    maps_file = fopen(maps_path, "r");
+    if (maps_file == NULL)
+    {
+        perror("Error opening memory map file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read and parse each line of the memory map file
+    while (fgets(line, sizeof(line), maps_file) != NULL)
+    {
+        // Example parsing: Print the start and end addresses of each memory region
+        char *start_address = strtok(line, "-");
+        char *end_address = strtok(NULL, " ");
+
+        if (start_address != NULL && end_address != NULL)
+        {
+            printf("Memory Region: %s - %s\n", start_address, end_address);
+        }
+    }
+
+    // Close the memory map file
+    fclose(maps_file);
+}
+
+// Function to calculate the ASLR offset
+void calculate_aslr_offset(pid_t child_pid)
+{
+    // Base address of the executable and shared libraries without ASLR
+    unsigned long expected_exec_base = 0x400000;
+    unsigned long expected_lib_base = 0x7f0000000000;
+
+    char maps_path[256];
+    FILE *maps_file;
+    char line[MAX_LINE_LENGTH];
+    unsigned long exec_base = 0;
+    unsigned long lib_base = 0;
+
+    // Construct the path to the memory map file of the child process
+    sprintf(maps_path, "/proc/%d/maps", child_pid);
+
+    // Open the memory map file
+    maps_file = fopen(maps_path, "r");
+    if (maps_file == NULL)
+    {
+        perror("Error opening memory map file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read and parse each line of the memory map file
+    while (fgets(line, sizeof(line), maps_file) != NULL)
+    {
+        char *start_address = strtok(line, "-");
+        if (start_address != NULL)
+        {
+            // Convert the start address to a hexadecimal value
+            unsigned long addr = strtoul(start_address, NULL, 16);
+
+            // Check if the address falls within the range of the executable
+            if (addr >= expected_exec_base && addr < expected_lib_base)
+            {
+                exec_base = addr;
+            }
+            // Check if the address falls within the range of a shared library
+            else if (addr >= expected_lib_base)
+            {
+                lib_base = addr;
+            }
+        }
+    }
+
+    // Calculate the ASLR offset for the executable and shared libraries
+    exec_aslr_offset = exec_base - expected_exec_base;
+    lib_aslr_offset = lib_base - expected_lib_base;
+
+    // 0x555555554000
+
+    printf("ASLR Offset for executable: %lx\n", exec_aslr_offset);
+    printf("ASLR Offset for shared libraries: %lx\n", lib_aslr_offset);
+
+    // Close the memory map file
+    fclose(maps_file);
+}
 
 // Function to disassemble the function and find its start and end addresses
 void disassemble_function(Elf *elf, Elf_Scn *scn, GElf_Shdr *shdr, FunctionInfo *function)
@@ -437,14 +538,25 @@ long set_breakpoint(int pid, long addr)
 {
     /* Backup current code.  */
     long original_ins = 0;
+    // addr += 0x555555554000;
+    // addr += 0x555555554000;
+    // fprintf(stderr, "0x%lx: 0x%lx\n", addr, original_ins);
+    // unsigned long addr2 = 0x555515555174;
+    // while (1)
+    // {
+    //     if (ptrace(PTRACE_PEEKDATA, pid, (void *)addr2, 0) != -1)
+    //     {
+    //         printf("AAAAAA %lx\n", addr2);
+    //         break;
+    //     }
+    //     addr2++;
+    // }
 
     original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (original_ins == -1)
     {
         DIE("Error setting breakpoint (peekdata): %s", strerror(errno));
     }
-
-    // fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, original_ins);
 
     /* Insert the breakpoint. */
     long trap = (original_ins & 0xFFFFFFFFFFFFFF00) | 0xCC;
@@ -750,6 +862,9 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
     // Now we can save the child pid
     *child_pid = atoi(child_pid_str);
 
+    // Calculate the ASLR offset
+    calculate_aslr_offset(*child_pid);
+
     ptrace(PTRACE_SETOPTIONS, *pid, 0, PTRACE_O_EXITKILL);
 
     waitpid(*pid, 0, 0);
@@ -980,6 +1095,7 @@ int run_gdb(char **argv)
             // fflush(stdout); // Flush stdout to ensure the message is displayed immediately
 
             long instruction = 0;
+            // address += 0x555555554000;
             if (process_started)
             {
                 instruction = set_breakpoint(pid, address);
