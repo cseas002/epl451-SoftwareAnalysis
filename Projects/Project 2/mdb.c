@@ -734,6 +734,12 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
         DIE("%s", strerror(errno));
     case 0: /* Code that is run by the child. */
         /* Disable ASLR (Address Space Layout Randomization) */
+        if (personality(0xffffffff & ~ADDR_NO_RANDOMIZE) == -1)
+        {
+            DIE("Failed to disable ASLR: %s", strerror(errno));
+        }
+
+        /* Disable ASLR (Address Space Layout Randomization) */
         if (personality(ADDR_NO_RANDOMIZE) == -1)
         {
             DIE("Failed to disable ASLR: %s", strerror(errno));
@@ -764,6 +770,7 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
         {
             DIE("Write to pipe failed: %s", strerror(errno));
         }
+
         execvp(program, argv + 1);
         DIE("%s", strerror(errno));
     }
