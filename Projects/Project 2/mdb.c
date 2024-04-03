@@ -11,10 +11,12 @@
 #include <unistd.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 
 /* Linux */
 #include <syscall.h>
 #include <sys/ptrace.h>
+#include <sys/personality.h>
 
 // #include <termios.h>
 // #include <conio.h>
@@ -53,102 +55,6 @@ unsigned int next_breakpoint_number = 1; // Initialize the next breakpoint numbe
 
 unsigned long exec_aslr_offset;
 unsigned long lib_aslr_offset;
-
-// Function to read and parse the memory map of the child process
-void read_memory_map(pid_t child_pid)
-{
-    char maps_path[256];
-    FILE *maps_file;
-    char line[MAX_LINE_LENGTH];
-
-    printf("Child pid: %d\n", child_pid);
-
-    // Construct the path to the memory map file of the child process
-    sprintf(maps_path, "/proc/%d/maps", child_pid);
-
-    // Open the memory map file
-    maps_file = fopen(maps_path, "r");
-    if (maps_file == NULL)
-    {
-        perror("Error opening memory map file");
-        exit(EXIT_FAILURE);
-    }
-
-    // Read and parse each line of the memory map file
-    while (fgets(line, sizeof(line), maps_file) != NULL)
-    {
-        // Example parsing: Print the start and end addresses of each memory region
-        char *start_address = strtok(line, "-");
-        char *end_address = strtok(NULL, " ");
-
-        if (start_address != NULL && end_address != NULL)
-        {
-            printf("Memory Region: %s - %s\n", start_address, end_address);
-        }
-    }
-
-    // Close the memory map file
-    fclose(maps_file);
-}
-
-// Function to calculate the ASLR offset
-void calculate_aslr_offset(pid_t child_pid)
-{
-    // Base address of the executable and shared libraries without ASLR
-    unsigned long expected_exec_base = 0x400000;
-    unsigned long expected_lib_base = 0x7f0000000000;
-
-    char maps_path[256];
-    FILE *maps_file;
-    char line[MAX_LINE_LENGTH];
-    unsigned long exec_base = 0;
-    unsigned long lib_base = 0;
-
-    // Construct the path to the memory map file of the child process
-    sprintf(maps_path, "/proc/%d/maps", child_pid);
-
-    // Open the memory map file
-    maps_file = fopen(maps_path, "r");
-    if (maps_file == NULL)
-    {
-        perror("Error opening memory map file");
-        exit(EXIT_FAILURE);
-    }
-
-    // Read and parse each line of the memory map file
-    while (fgets(line, sizeof(line), maps_file) != NULL)
-    {
-        char *start_address = strtok(line, "-");
-        if (start_address != NULL)
-        {
-            // Convert the start address to a hexadecimal value
-            unsigned long addr = strtoul(start_address, NULL, 16);
-
-            // Check if the address falls within the range of the executable
-            if (addr >= expected_exec_base && addr < expected_lib_base)
-            {
-                exec_base = addr;
-            }
-            // Check if the address falls within the range of a shared library
-            else if (addr >= expected_lib_base)
-            {
-                lib_base = addr;
-            }
-        }
-    }
-
-    // Calculate the ASLR offset for the executable and shared libraries
-    exec_aslr_offset = exec_base - expected_exec_base;
-    lib_aslr_offset = lib_base - expected_lib_base;
-
-    // 0x555555554000
-
-    printf("ASLR Offset for executable: %lx\n", exec_aslr_offset);
-    printf("ASLR Offset for shared libraries: %lx\n", lib_aslr_offset);
-
-    // Close the memory map file
-    fclose(maps_file);
-}
 
 // Function to disassemble the function and find its start and end addresses
 void disassemble_function(Elf *elf, Elf_Scn *scn, GElf_Shdr *shdr, FunctionInfo *function)
@@ -827,6 +733,16 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
     case -1: /* error */
         DIE("%s", strerror(errno));
     case 0: /* Code that is run by the child. */
+        /* Disable ASLR (Address Space Layout Randomization) */
+        if (personality(ADDR_NO_RANDOMIZE) == -1)
+        {
+            DIE("Failed to disable ASLR: %s", strerror(errno));
+        }
+        /* Disable ASLR (Address Space Layout Randomization) */
+        if (prctl(PR_SET_DUMPABLE, 0) == -1)
+        {
+            DIE("Failed to disable ASLR: %s", strerror(errno));
+        }
         /* Start tracing.  */
         ptrace(PTRACE_TRACEME, 0, 0, 0);
         /* execvp() is a system call, the child will block and
@@ -834,6 +750,10 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
            The waitpid() of the parent is in the label
            waitpid_for_execvp.
          */
+
+        /* Duplicate the pipe file descriptor */
+        close(pipe_fd[0]);               // Close the read end of the pipe
+        dup2(pipe_fd[1], STDOUT_FILENO); // Redirect stdout to the write end of the pipe
 
         pid_t child_pid_in_child = getpid();
         // Convert child PID to string
@@ -844,7 +764,6 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
         {
             DIE("Write to pipe failed: %s", strerror(errno));
         }
-
         execvp(program, argv + 1);
         DIE("%s", strerror(errno));
     }
@@ -861,9 +780,6 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
 
     // Now we can save the child pid
     *child_pid = atoi(child_pid_str);
-
-    // Calculate the ASLR offset
-    calculate_aslr_offset(*child_pid);
 
     ptrace(PTRACE_SETOPTIONS, *pid, 0, PTRACE_O_EXITKILL);
 
