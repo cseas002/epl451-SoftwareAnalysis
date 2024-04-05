@@ -444,19 +444,6 @@ long set_breakpoint(int pid, long addr)
 {
     /* Backup current code.  */
     long original_ins = 0;
-    // addr += 0x555555554000;
-    // addr += 0x555555554000;
-    // fprintf(stderr, "0x%lx: 0x%lx\n", addr, original_ins);
-    // unsigned long addr2 = 0x555515555174;
-    // while (1)
-    // {
-    //     if (ptrace(PTRACE_PEEKDATA, pid, (void *)addr2, 0) != -1)
-    //     {
-    //         printf("AAAAAA %lx\n", addr2);
-    //         break;
-    //     }
-    //     addr2++;
-    // }
 
     original_ins = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (original_ins == -1)
@@ -468,12 +455,6 @@ long set_breakpoint(int pid, long addr)
     long trap = (original_ins & 0xFFFFFFFFFFFFFF00) | 0xCC;
     if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
         DIE("(pokedata) %s", strerror(errno));
-
-    // printf("POKED Data on address %lx\n", addr);
-
-    /* Resume process.  */
-    // if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-    //     DIE("(cont) %s", strerror(errno));
 
     for (int i = 0; i < breakpoints_count; i++)
     {
@@ -701,10 +682,8 @@ void serve_breakpoint(Elf *elf, int pid)
 
 void show_initial_console_messaage()
 {
-    printf("For help, type \"help\".\n");
-    // printf("Type \"apropos word\" to search for commands related to \"word\"...\n");
+    // printf("For help, type \"help\".\n");
     printf("Reading symbols from test...\n");
-    // fflush(stdout);
 }
 
 void show_console()
@@ -795,7 +774,6 @@ void run_tracee_program(pid_t *pid, Elf **elf, Elf_Scn **symtab, char **argv, pi
     for (int i = 0; i < breakpoints_count; i++)
     {
         set_breakpoint(*pid, breakpoints[i].address);
-        // printf("Breakpoint %lx set \n", breakpoints[i].address);
     }
 
     // Continue the execution
@@ -975,10 +953,10 @@ int run_gdb(char **argv)
         {
             // Do nothing (this will happen if the user presses enter the first time)
         }
-        else if (strcmp(command, "help") == 0)
-        {
-            printf("This is a help message.\n");
-        }
+        // else if (strcmp(command, "help") == 0)
+        // {
+        //     printf("This is a help message.\n");
+        // }
         else if (strncmp(command, "r", strlen("r")) == 0)
         {
             // Run the child program
@@ -1159,15 +1137,6 @@ int run_gdb(char **argv)
                         process_is_running = false;
                     }
                 }
-                else
-                {
-                    // Handle other stop signals
-                    printf("HEREEEE\n");
-                }
-            }
-            else
-            {
-                printf("HERE2\n");
             }
         }
     }
